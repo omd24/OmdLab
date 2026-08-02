@@ -3,6 +3,7 @@
 #include "BackgroundPass.h"
 #include "Buffer.h"
 #include "Device.h"
+#include "Foundation/Log.h"
 #include "ForwardPass.h"
 #include "ImGuiHelper.h"
 #include "Pipeline.h"
@@ -12,6 +13,8 @@
     #define WIN32_LEAN_AND_MEAN
     #include <Windows.h>
 #endif
+
+#include <imgui.h>
 
 namespace Renderer
 {
@@ -56,10 +59,42 @@ namespace Renderer
         {
             ImGuiHelper::NewFrame();
 
+            // Bring-up-only debug UI: a window rendering alone doesn't
+            // prove mouse/keyboard input is actually reaching ImGui -
+            // toggling these does.
+            static bool enableBackgroundPass = true;
+            static bool enableForwardPass = true;
+            ImGui::Begin("Renderer Debug");
+            if (ImGui::Checkbox("Background compute pass", &enableBackgroundPass))
+            {
+                Foundation::Log::Write(
+                    Foundation::Log::Severity::Info, "Renderer", "Background compute pass %s", enableBackgroundPass ? "enabled" : "disabled");
+            }
+            if (ImGui::Checkbox("Forward triangle pass", &enableForwardPass))
+            {
+                Foundation::Log::Write(
+                    Foundation::Log::Severity::Info, "Renderer", "Forward triangle pass %s", enableForwardPass ? "enabled" : "disabled");
+            }
+            ImGui::End();
+
             Device::BeginFrame();
-            BackgroundPass::Render({});
-            Device::CompositeComputeTarget();
-            ForwardPass::Render({});
+            if (enableBackgroundPass)
+            {
+                BackgroundPass::Render({});
+                Device::CompositeComputeTarget();
+            }
+            else
+            {
+                // Skipping the compute dispatch but still calling
+                // CompositeComputeTarget() would copy in whatever the
+                // compute target was last left holding, frozen rather than
+                // actually absent - clear the back buffer directly instead.
+                Device::ClearAndBindRenderTarget();
+            }
+            if (enableForwardPass)
+            {
+                ForwardPass::Render({});
+            }
             ImGuiHelper::Render();
             Device::EndFrame();
         }

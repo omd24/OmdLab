@@ -14,6 +14,7 @@ namespace
 {
     constexpr UINT kBackBufferCount = 2;
 
+    HWND g_window = nullptr;
     UINT g_width = 0;
     UINT g_height = 0;
 
@@ -65,6 +66,24 @@ namespace
         g_commandList->ResourceBarrier(1, &barrier);
     }
 
+    // Shared by CompositeComputeTarget()/ClearAndBindRenderTarget() - both
+    // end with the back buffer already transitioned into
+    // D3D12_RESOURCE_STATE_RENDER_TARGET and just need it bound.
+    void BindBackBufferAsRenderTarget(UINT backBufferIndex)
+    {
+        const D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = RtvHandleFor(backBufferIndex);
+        g_commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
+
+        // Required every time the command list records draws - the
+        // rasterizer clips away all geometry without an explicit
+        // viewport/scissor rect, regardless of the render target's own
+        // size (this has no default).
+        const D3D12_VIEWPORT viewport = { 0.0f, 0.0f, static_cast<float>(g_width), static_cast<float>(g_height), 0.0f, 1.0f };
+        const D3D12_RECT scissorRect = { 0, 0, static_cast<LONG>(g_width), static_cast<LONG>(g_height) };
+        g_commandList->RSSetViewports(1, &viewport);
+        g_commandList->RSSetScissorRects(1, &scissorRect);
+    }
+
     // Fully synchronous: every frame waits for the GPU to finish before
     // returning. Correct and simple.
     //
@@ -82,12 +101,86 @@ namespace
         }
     }
 
+    // Shared by Init() and ResizeIfNeeded() - fetches the swap chain's
+    // current back buffer resources and (re)creates their RTVs.
+    void CreateBackBuffersAndRtvs()
+    {
+        for (UINT i = 0; i < kBackBufferCount; ++i)
+        {
+            CheckHr(g_swapChain->GetBuffer(i, IID_PPV_ARGS(&g_backBuffers[i])), "IDXGISwapChain::GetBuffer");
+            g_device->CreateRenderTargetView(g_backBuffers[i].Get(), nullptr, RtvHandleFor(i));
+        }
+    }
+
+    // Shared by Init() and ResizeIfNeeded() - (re)creates the offscreen
+    // compute target at the given size and points the existing UAV heap
+    // slot at it.
+    void CreateComputeTargetAndUav(UINT width, UINT height)
+    {
+        D3D12_HEAP_PROPERTIES heapProps = {};
+        heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+        D3D12_RESOURCE_DESC resourceDesc = {};
+        resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        resourceDesc.Width = width;
+        resourceDesc.Height = height;
+        resourceDesc.DepthOrArraySize = 1;
+        resourceDesc.MipLevels = 1;
+        resourceDesc.Format = Renderer::kBackBufferFormat;
+        resourceDesc.SampleDesc.Count = 1;
+        resourceDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+
+        CheckHr(
+            g_device->CreateCommittedResource(
+                &heapProps, D3D12_HEAP_FLAG_NONE, &resourceDesc, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
+                IID_PPV_ARGS(&g_computeTarget)),
+            "ID3D12Device::CreateCommittedResource (compute target)");
+
+        g_device->CreateUnorderedAccessView(g_computeTarget.Get(), nullptr, nullptr, g_uavHeap->GetCPUDescriptorHandleForHeapStart());
+    }
+
+    // Polled once per frame from BeginFrame() rather than driven by a
+    // WM_SIZE hook - GetClientRect is cheap, and this avoids adding a
+    // second Foundation::Window hook alongside the message hook ImGui
+    // already uses. Skips zero-size (minimized) and no-op resizes.
+    void ResizeIfNeeded()
+    {
+        RECT clientRect = {};
+        GetClientRect(g_window, &clientRect);
+        const UINT newWidth = static_cast<UINT>(clientRect.right - clientRect.left);
+        const UINT newHeight = static_cast<UINT>(clientRect.bottom - clientRect.top);
+
+        if (newWidth == 0 || newHeight == 0 || (newWidth == g_width && newHeight == g_height))
+        {
+            return;
+        }
+
+        WaitForGpu();
+
+        for (UINT i = 0; i < kBackBufferCount; ++i)
+        {
+            g_backBuffers[i].Reset();
+        }
+        g_computeTarget.Reset();
+
+        CheckHr(
+            g_swapChain->ResizeBuffers(kBackBufferCount, newWidth, newHeight, Renderer::kBackBufferFormat, 0), "IDXGISwapChain::ResizeBuffers");
+
+        CreateBackBuffersAndRtvs();
+        CreateComputeTargetAndUav(newWidth, newHeight);
+
+        g_width = newWidth;
+        g_height = newHeight;
+
+        Foundation::Log::Write(Foundation::Log::Severity::Info, "Renderer", "Resized to %ux%u", newWidth, newHeight);
+    }
 }
 
 namespace Renderer
 {
     void DeviceDX12::Init(HWND window, unsigned int width, unsigned int height)
     {
+        g_window = window;
         g_width = width;
         g_height = height;
 
@@ -172,37 +265,14 @@ namespace Renderer
         CheckHr(g_device->CreateDescriptorHeap(&rtvHeapDesc, IID_PPV_ARGS(&g_rtvHeap)), "ID3D12Device::CreateDescriptorHeap (RTV)");
         g_rtvDescriptorSize = g_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
 
-        for (UINT i = 0; i < kBackBufferCount; ++i)
-        {
-            CheckHr(g_swapChain->GetBuffer(i, IID_PPV_ARGS(&g_backBuffers[i])), "IDXGISwapChain::GetBuffer");
-            g_device->CreateRenderTargetView(g_backBuffers[i].Get(), nullptr, RtvHandleFor(i));
-        }
-
-        D3D12_HEAP_PROPERTIES computeTargetHeapProps = {};
-        computeTargetHeapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
-
-        D3D12_RESOURCE_DESC computeTargetDesc = {};
-        computeTargetDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-        computeTargetDesc.Width = width;
-        computeTargetDesc.Height = height;
-        computeTargetDesc.DepthOrArraySize = 1;
-        computeTargetDesc.MipLevels = 1;
-        computeTargetDesc.Format = kBackBufferFormat;
-        computeTargetDesc.SampleDesc.Count = 1;
-        computeTargetDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-
-        CheckHr(
-            g_device->CreateCommittedResource(
-                &computeTargetHeapProps, D3D12_HEAP_FLAG_NONE, &computeTargetDesc, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
-                IID_PPV_ARGS(&g_computeTarget)),
-            "ID3D12Device::CreateCommittedResource (compute target)");
+        CreateBackBuffersAndRtvs();
 
         D3D12_DESCRIPTOR_HEAP_DESC uavHeapDesc = {};
         uavHeapDesc.NumDescriptors = 1;
         uavHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
         uavHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         CheckHr(g_device->CreateDescriptorHeap(&uavHeapDesc, IID_PPV_ARGS(&g_uavHeap)), "ID3D12Device::CreateDescriptorHeap (UAV)");
-        g_device->CreateUnorderedAccessView(g_computeTarget.Get(), nullptr, nullptr, g_uavHeap->GetCPUDescriptorHandleForHeapStart());
+        CreateComputeTargetAndUav(width, height);
 
         CheckHr(
             g_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&g_commandAllocator)),
@@ -229,6 +299,8 @@ namespace Renderer
 
     void DeviceDX12::BeginFrame()
     {
+        ResizeIfNeeded();
+
         CheckHr(g_commandAllocator->Reset(), "ID3D12CommandAllocator::Reset");
         CheckHr(g_commandList->Reset(g_commandAllocator.Get(), nullptr), "ID3D12GraphicsCommandList::Reset");
 
@@ -254,17 +326,20 @@ namespace Renderer
         // to it again without needing its own transition.
         TransitionResource(g_computeTarget.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
-        const D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = RtvHandleFor(backBufferIndex);
-        g_commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
+        BindBackBufferAsRenderTarget(backBufferIndex);
+    }
 
-        // Required every time the command list records draws - the
-        // rasterizer clips away all geometry without an explicit
-        // viewport/scissor rect, regardless of the render target's own
-        // size (this has no default).
-        const D3D12_VIEWPORT viewport = { 0.0f, 0.0f, static_cast<float>(g_width), static_cast<float>(g_height), 0.0f, 1.0f };
-        const D3D12_RECT scissorRect = { 0, 0, static_cast<LONG>(g_width), static_cast<LONG>(g_height) };
-        g_commandList->RSSetViewports(1, &viewport);
-        g_commandList->RSSetScissorRects(1, &scissorRect);
+    void DeviceDX12::ClearAndBindRenderTarget()
+    {
+        const UINT backBufferIndex = g_swapChain->GetCurrentBackBufferIndex();
+        ID3D12Resource* backBuffer = g_backBuffers[backBufferIndex].Get();
+
+        TransitionResource(backBuffer, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
+
+        const float clearColor[4] = { 0.05f, 0.32f, 0.5f, 1.0f };
+        g_commandList->ClearRenderTargetView(RtvHandleFor(backBufferIndex), clearColor, 0, nullptr);
+
+        BindBackBufferAsRenderTarget(backBufferIndex);
     }
 
     void DeviceDX12::EndFrame()

@@ -34,9 +34,20 @@ namespace Renderer
             OMD_GFX_CALL(Device, BeginFrame());
         }
 
+        // Copies the compute target into the back buffer and binds the
+        // back buffer as the active render target - use after a compute
+        // pass has actually written the compute target this frame.
         static void CompositeComputeTarget()
         {
             OMD_GFX_CALL(Device, CompositeComputeTarget());
+        }
+
+        // Alternative to CompositeComputeTarget() for when no compute pass
+        // ran this frame - clears the back buffer directly and binds it,
+        // instead of copying in the compute target's frozen last content.
+        static void ClearAndBindRenderTarget()
+        {
+            OMD_GFX_CALL(Device, ClearAndBindRenderTarget());
         }
 
         // Ends a frame: closes and submits the command list, presents, and

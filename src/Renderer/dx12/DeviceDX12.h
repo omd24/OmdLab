@@ -27,15 +27,18 @@ namespace Renderer
         //    descriptor heap, ready for a compute pass to dispatch into the
         //    offscreen compute target (D3D12 disallows UAV usage directly
         //    on swap chain back buffers, unlike D3D11).
-        // 2. CompositeComputeTarget() - copies the compute target into the
-        //    actual back buffer and binds the back buffer as the active
-        //    render target with its viewport/scissor set, ready for a
-        //    graphics draw on top. No clear beforehand - the copy already
-        //    filled every pixel.
+        // 2. Either CompositeComputeTarget() - copies the compute target
+        //    into the actual back buffer (no clear beforehand - the copy
+        //    already filled every pixel) - or, if no compute pass ran this
+        //    frame, ClearAndBindRenderTarget() instead, which clears
+        //    directly. Either way, the back buffer ends up bound as the
+        //    active render target with its viewport/scissor set, ready for
+        //    a graphics draw on top.
         // 3. EndFrame() - transitions the back buffer to PRESENT, submits,
         //    and presents.
         static void BeginFrame();
         static void CompositeComputeTarget();
+        static void ClearAndBindRenderTarget();
         static void EndFrame();
 
         // Raw device pointer for other dx12/ backend files that need to

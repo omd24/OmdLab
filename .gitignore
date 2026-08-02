@@ -26,3 +26,6 @@ NOTES/
 
 # Misc
 *.log
+
+# ImGui's window-layout autosave (per-machine, regenerated on first run)
+/imgui.ini
