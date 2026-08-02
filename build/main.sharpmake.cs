@@ -8,6 +8,18 @@ public class BaseTarget : Target
     }
 }
 
+// DirectX Agility SDK, pulled in via NuGet rather than vendored under
+// thirdParty/, since Sharpmake's native NuGet support (ReferencesByNuGetPackage)
+// restores it under the gitignored projects/ folder like everything else
+// Sharpmake generates. Version string is the NuGet package version; the
+// exported D3D12SDKVersion in Game/main.cpp must match its middle component
+// (e.g. "1.619.5" -> 619) or D3D12CreateDevice fails.
+public static class AgilitySdk
+{
+    public const string NuGetVersion = "1.619.5";
+    public const string SdkPath = @".\D3D12\\";
+}
+
 public abstract class OmdLabProjectBase : Project
 {
     protected OmdLabProjectBase(string name)
@@ -77,6 +89,8 @@ public class Renderer : OmdLabProjectBase
         base.ConfigureAll(conf, target);
         conf.AddPublicDependency<Foundation>(target);
         conf.LibraryFiles.Add("d3d12.lib", "dxgi.lib");
+        conf.ReferencesByNuGetPackage.Add("Microsoft.Direct3D.D3D12", AgilitySdk.NuGetVersion);
+        conf.CustomProperties.Add("Microsoft_Direct3D_D3D12_D3D12SDKPath", AgilitySdk.SdkPath);
     }
 }
 
@@ -122,6 +136,12 @@ public class Game : OmdLabProjectBase
 
         conf.AddPublicDependency<Engine>(target);
         conf.Options.Add(Options.Vc.Linker.SubSystem.Windows);
+
+        // Redist DLLs (D3D12Core.dll, D3D12SDKLayers.dll) only get copied
+        // next to the binary that references the NuGet package directly -
+        // Renderer's copy of them (as a static lib) doesn't propagate here.
+        conf.ReferencesByNuGetPackage.Add("Microsoft.Direct3D.D3D12", AgilitySdk.NuGetVersion);
+        conf.CustomProperties.Add("Microsoft_Direct3D_D3D12_D3D12SDKPath", AgilitySdk.SdkPath);
     }
 }
 

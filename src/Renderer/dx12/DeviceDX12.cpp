@@ -114,6 +114,22 @@ namespace Renderer
         }
         OMD_ASSERT(g_device != nullptr, "No suitable D3D12 adapter found");
 
+        // Agility SDK verification: D3D12SDKVersion/D3D12SDKPath (exported from
+        // Game/main.cpp) tell the loader where to look, but a missing/mismatched
+        // redist silently falls back to the OS-inbox runtime instead of failing -
+        // so log which D3D12Core.dll actually got loaded into the process.
+        if (HMODULE d3d12Core = GetModuleHandleA("D3D12Core.dll"))
+        {
+            char corePath[MAX_PATH] = {};
+            GetModuleFileNameA(d3d12Core, corePath, static_cast<DWORD>(sizeof(corePath)));
+            Foundation::Log::Write(Foundation::Log::Severity::Info, "Renderer", "D3D12 runtime: %s", corePath);
+        }
+        else
+        {
+            Foundation::Log::Write(
+                Foundation::Log::Severity::Warning, "Renderer", "D3D12Core.dll not found as a loaded module - Agility SDK may not be active");
+        }
+
         D3D12_COMMAND_QUEUE_DESC queueDesc = {};
         queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
         CheckHr(g_device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&g_commandQueue)), "ID3D12Device::CreateCommandQueue");

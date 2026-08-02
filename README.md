@@ -38,6 +38,15 @@ graph BT
 | `Engine` | ECS, animation runtime, input, physics/collision, fixed-timestep simulation, and the resource layer connecting `Asset` data to `Renderer` GPU resources. | `Foundation`, `Renderer`, `Asset` |
 | `Game` | Fighting-game-specific logic and content. Not reusable. | `Engine` |
 
+## Building
+
+1. Run `GenerateSolution.bat` from the repo root to generate the Visual
+   Studio solution/project files under `projects/` (regenerate any time
+   `build/*.sharpmake.cs` changes).
+2. Open `projects/omdlab_win64_vs2022.sln` and build. The first build
+   requires internet access: it restores the DirectX Agility SDK via NuGet
+   and copies its runtime DLLs next to the built executable.
+
 ## Status
 
 Work in progress.
