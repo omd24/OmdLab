@@ -112,6 +112,9 @@ public class Game : OmdLabProjectBase
         conf.Output = Configuration.OutputType.Exe;
         conf.TargetPath = $@"[project.SharpmakeCsPath]/../bin/[target.Optimization]_[target.Platform]";
 
+        conf.VcxprojUserFile = new Configuration.VcxprojUserFileSettings();
+        conf.VcxprojUserFile.LocalDebuggerWorkingDirectory = @"[project.SharpmakeCsPath]/..";
+
         conf.AddPublicDependency<Engine>(target);
         conf.Options.Add(Options.Vc.Linker.SubSystem.Console);
     }

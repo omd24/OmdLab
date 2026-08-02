@@ -2,9 +2,8 @@
 
 #include "Asset/Asset.h"
 #include "Foundation/Foundation.h"
+#include "Foundation/Log.h"
 #include "Renderer/Renderer.h"
-
-#include <cstdio>
 
 namespace Engine
 {
@@ -15,8 +14,10 @@ namespace Engine
 
     void PrintDependencyChain()
     {
-        std::printf(
-            "%s -> %s -> %s -> %s\n",
+        Foundation::Log::Write(
+            Foundation::Log::Severity::Info,
+            "Engine",
+            "%s -> %s -> %s -> %s",
             GetName(),
             Renderer::GetName(),
             Asset::GetName(),

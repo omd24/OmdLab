@@ -7,6 +7,9 @@ NOTES/
 /tmp/
 /bin/
 
+# Runtime logs
+/logs/
+
 # Visual Studio
 .vs/
 *.vcxproj.user
