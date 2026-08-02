@@ -54,6 +54,11 @@ public abstract class OmdLabProjectBase : Project
         {
             conf.Defines.Add("OMD_WINDOWS");
         }
+
+        // Graphics backend selection - see Renderer/PlatformMacros.h and DESIGN.md's
+        // "Graphics backend routing convention". Global so every project's headers agree
+        // on which backend is active.
+        conf.Defines.Add("OMD_GFX_DX12");
     }
 }
 
@@ -72,6 +77,7 @@ public class Renderer : OmdLabProjectBase
     {
         base.ConfigureAll(conf, target);
         conf.AddPublicDependency<Foundation>(target);
+        conf.LibraryFiles.Add("d3d12.lib", "dxgi.lib");
     }
 }
 
