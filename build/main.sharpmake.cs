@@ -20,6 +20,12 @@ public static class AgilitySdk
     public const string SdkPath = @".\D3D12\\";
 }
 
+// DirectX Shader Compiler, also via NuGet (same reasoning as AgilitySdk above).
+public static class Dxc
+{
+    public const string NuGetVersion = "1.9.2607.13";
+}
+
 public abstract class OmdLabProjectBase : Project
 {
     protected OmdLabProjectBase(string name)
@@ -91,6 +97,7 @@ public class Renderer : OmdLabProjectBase
         conf.LibraryFiles.Add("d3d12.lib", "dxgi.lib");
         conf.ReferencesByNuGetPackage.Add("Microsoft.Direct3D.D3D12", AgilitySdk.NuGetVersion);
         conf.CustomProperties.Add("Microsoft_Direct3D_D3D12_D3D12SDKPath", AgilitySdk.SdkPath);
+        conf.ReferencesByNuGetPackage.Add("Microsoft.Direct3D.DXC", Dxc.NuGetVersion);
     }
 }
 
@@ -142,6 +149,7 @@ public class Game : OmdLabProjectBase
         // Renderer's copy of them (as a static lib) doesn't propagate here.
         conf.ReferencesByNuGetPackage.Add("Microsoft.Direct3D.D3D12", AgilitySdk.NuGetVersion);
         conf.CustomProperties.Add("Microsoft_Direct3D_D3D12_D3D12SDKPath", AgilitySdk.SdkPath);
+        conf.ReferencesByNuGetPackage.Add("Microsoft.Direct3D.DXC", Dxc.NuGetVersion);
     }
 }
 

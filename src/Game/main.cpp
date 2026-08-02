@@ -3,6 +3,7 @@
 #include "Foundation/Log.h"
 #include "Foundation/Window.h"
 #include "Renderer/Device.h"
+#include "Renderer/Shader.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
@@ -41,6 +42,11 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     }
 
     Renderer::Device::Init(window, windowWidth, windowHeight);
+
+    Renderer::CompiledShader triangleVs = Renderer::Shader::CompileShader("data/shaders/Triangle.hlsl", "VSMain", "vs_6_0");
+    OMD_ASSERT(!triangleVs.bytecode.empty(), "Triangle vertex shader failed to compile");
+    Renderer::CompiledShader trianglePs = Renderer::Shader::CompileShader("data/shaders/Triangle.hlsl", "PSMain", "ps_6_0");
+    OMD_ASSERT(!trianglePs.bytecode.empty(), "Triangle pixel shader failed to compile");
 
     while (Foundation::PumpMessages())
     {
