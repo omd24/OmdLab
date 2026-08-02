@@ -4,6 +4,7 @@
 #include "Buffer.h"
 #include "Device.h"
 #include "ForwardPass.h"
+#include "ImGuiHelper.h"
 #include "Pipeline.h"
 #include "PlatformMacros.h"
 
@@ -38,10 +39,12 @@ namespace Renderer
             Device::Init(window, width, height);
             BackgroundPass::Init();
             ForwardPass::Init();
+            ImGuiHelper::Init(window);
         }
 
         static void Shutdown()
         {
+            ImGuiHelper::Shutdown();
             ForwardPass::Shutdown();
             BackgroundPass::Shutdown();
             Pipeline::Shutdown();
@@ -51,10 +54,13 @@ namespace Renderer
 
         static void DoFrame()
         {
+            ImGuiHelper::NewFrame();
+
             Device::BeginFrame();
             BackgroundPass::Render({});
             Device::CompositeComputeTarget();
             ForwardPass::Render({});
+            ImGuiHelper::Render();
             Device::EndFrame();
         }
     };

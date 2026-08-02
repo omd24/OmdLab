@@ -9,9 +9,18 @@
 namespace
 {
     HWND g_gameWindow = nullptr;
+    Foundation::WindowMessageHook g_messageHook = nullptr;
 
     LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     {
+        if (g_messageHook != nullptr)
+        {
+            if (const LRESULT hookResult = g_messageHook(hwnd, msg, wParam, lParam); hookResult != 0)
+            {
+                return hookResult;
+            }
+        }
+
         switch (msg)
         {
             case WM_DESTROY:
@@ -117,6 +126,11 @@ namespace Foundation
             DispatchMessageA(&msg);
         }
         return true;
+    }
+
+    void SetWindowMessageHook(WindowMessageHook hook)
+    {
+        g_messageHook = hook;
     }
 
 #endif

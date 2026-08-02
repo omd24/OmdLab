@@ -88,7 +88,14 @@ public class Foundation : OmdLabProjectBase
 [Sharpmake.Generate]
 public class Renderer : OmdLabProjectBase
 {
-    public Renderer() : base("Renderer") { }
+    public Renderer() : base("Renderer")
+    {
+        // Dear ImGui (vendored under thirdParty/imgui/, pinned to v1.92.9b -
+        // see thirdParty/imgui/LICENSE.txt) compiles as part of Renderer
+        // itself rather than a separate project - contained to Renderer's
+        // debug-UI concern, nothing else references it yet.
+        AdditionalSourceRootPaths.Add(@"[project.SharpmakeCsPath]/../thirdParty/imgui");
+    }
 
     public override void ConfigureAll(Configuration conf, Target target)
     {
@@ -98,6 +105,8 @@ public class Renderer : OmdLabProjectBase
         conf.ReferencesByNuGetPackage.Add("Microsoft.Direct3D.D3D12", AgilitySdk.NuGetVersion);
         conf.CustomProperties.Add("Microsoft_Direct3D_D3D12_D3D12SDKPath", AgilitySdk.SdkPath);
         conf.ReferencesByNuGetPackage.Add("Microsoft.Direct3D.DXC", Dxc.NuGetVersion);
+        conf.IncludePaths.Add(@"[project.SharpmakeCsPath]/../thirdParty/imgui");
+        conf.IncludePaths.Add(@"[project.SharpmakeCsPath]/../thirdParty/imgui/backends");
     }
 }
 

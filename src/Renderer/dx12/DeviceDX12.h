@@ -5,6 +5,7 @@
 
 #include <dxgiformat.h>
 
+struct ID3D12CommandQueue;
 struct ID3D12Device;
 struct ID3D12GraphicsCommandList;
 
@@ -55,5 +56,10 @@ namespace Renderer
 
         static unsigned int GetWidth();
         static unsigned int GetHeight();
+
+        // For other dx12/ backend files that need to queue their own GPU
+        // work (e.g. ImGui's texture uploads). Only valid between Init()
+        // and Shutdown().
+        static ID3D12CommandQueue* GetCommandQueue();
     };
 }

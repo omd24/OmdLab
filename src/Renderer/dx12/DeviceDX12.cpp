@@ -307,4 +307,9 @@ namespace Renderer
     {
         return g_height;
     }
+
+    ID3D12CommandQueue* DeviceDX12::GetCommandQueue()
+    {
+        return g_commandQueue.Get();
+    }
 }
