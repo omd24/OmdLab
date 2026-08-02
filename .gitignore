@@ -1,19 +1,25 @@
-# Private design/chat notes - never tracked
+# Private design scratch notes - not tracked
 DESIGN.md
 NOTES/
 
-# Visual Studio / build
+# Sharpmake-generated solution/build output (regenerate via GenerateSolution.bat)
+/projects/
+/tmp/
+/bin/
+
+# Visual Studio
 .vs/
-x64/
-x86/
-Debug/
-Release/
-obj/
 *.vcxproj.user
+
+# Stray build artifacts outside tmp/bin (safety net) - vendored thirdParty binaries excluded
 *.pdb
 *.ilk
 *.exe
 *.obj
+!thirdParty/**/*.pdb
+!thirdParty/**/*.ilk
+!thirdParty/**/*.exe
+!thirdParty/**/*.obj
 
 # Misc
 *.log
