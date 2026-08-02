@@ -18,7 +18,23 @@ namespace Renderer
     {
         static void Init(HWND window, unsigned int width, unsigned int height);
         static void Shutdown();
+
+        // One frame's fixed recipe, in three stages (see RenderTasks for
+        // where these get called in order):
+        //
+        // 1. BeginFrame() - resets command recording and binds the UAV
+        //    descriptor heap, ready for a compute pass to dispatch into the
+        //    offscreen compute target (D3D12 disallows UAV usage directly
+        //    on swap chain back buffers, unlike D3D11).
+        // 2. CompositeComputeTarget() - copies the compute target into the
+        //    actual back buffer and binds the back buffer as the active
+        //    render target with its viewport/scissor set, ready for a
+        //    graphics draw on top. No clear beforehand - the copy already
+        //    filled every pixel.
+        // 3. EndFrame() - transitions the back buffer to PRESENT, submits,
+        //    and presents.
         static void BeginFrame();
+        static void CompositeComputeTarget();
         static void EndFrame();
 
         // Raw device pointer for other dx12/ backend files that need to
@@ -30,5 +46,14 @@ namespace Renderer
         // (render passes) that need to record draw/dispatch commands. Only
         // valid between BeginFrame() and EndFrame().
         static ID3D12GraphicsCommandList* GetCommandList();
+
+        // GPU descriptor handle (as a raw UINT64 - avoids needing the full
+        // D3D12_GPU_DESCRIPTOR_HANDLE definition in this header) for the
+        // offscreen compute target's UAV. Only valid between BeginFrame()
+        // and CompositeComputeTarget().
+        static unsigned long long GetComputeTargetUAV();
+
+        static unsigned int GetWidth();
+        static unsigned int GetHeight();
     };
 }

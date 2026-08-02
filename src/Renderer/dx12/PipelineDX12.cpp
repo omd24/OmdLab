@@ -38,19 +38,12 @@ namespace
                 return DXGI_FORMAT_UNKNOWN;
         }
     }
-}
 
-namespace Renderer
-{
-    PipelineHandle PipelineDX12::Create(const PipelineDesc& desc)
+    // Shared by CreateGraphics()/CreateCompute() - both serialize a
+    // D3D12_ROOT_SIGNATURE_DESC the same way, they just build a different
+    // one.
+    ComPtr<ID3D12RootSignature> SerializeAndCreateRootSignature(ID3D12Device* device, const D3D12_ROOT_SIGNATURE_DESC& rootSignatureDesc)
     {
-        ID3D12Device* device = DeviceDX12::GetDevice();
-
-        // No CBV/SRV/UAV/samplers - nothing built against this yet needs
-        // any resource bindings beyond the vertex buffer itself.
-        D3D12_ROOT_SIGNATURE_DESC rootSignatureDesc = {};
-        rootSignatureDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
-
         ComPtr<ID3DBlob> signatureBlob;
         ComPtr<ID3DBlob> errorBlob;
         const HRESULT serializeHr =
@@ -63,11 +56,27 @@ namespace Renderer
         }
         CheckHr(serializeHr, "D3D12SerializeRootSignature");
 
-        PipelineEntry entry;
+        ComPtr<ID3D12RootSignature> rootSignature;
         CheckHr(
             device->CreateRootSignature(
-                0, signatureBlob->GetBufferPointer(), signatureBlob->GetBufferSize(), IID_PPV_ARGS(&entry.rootSignature)),
+                0, signatureBlob->GetBufferPointer(), signatureBlob->GetBufferSize(), IID_PPV_ARGS(&rootSignature)),
             "ID3D12Device::CreateRootSignature");
+        return rootSignature;
+    }
+}
+
+namespace Renderer
+{
+    PipelineHandle PipelineDX12::CreateGraphics(const GraphicsPipelineDesc& desc)
+    {
+        ID3D12Device* device = DeviceDX12::GetDevice();
+
+        // No CBV/SRV/UAV/samplers - see GraphicsPipelineDesc.
+        D3D12_ROOT_SIGNATURE_DESC rootSignatureDesc = {};
+        rootSignatureDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+
+        PipelineEntry entry;
+        entry.rootSignature = SerializeAndCreateRootSignature(device, rootSignatureDesc);
 
         std::vector<D3D12_INPUT_ELEMENT_DESC> inputElements(desc.vertexAttributeCount);
         for (unsigned int i = 0; i < desc.vertexAttributeCount; ++i)
@@ -97,7 +106,10 @@ namespace Renderer
 
         psoDesc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
 
-        // No depth buffer yet - depth testing stays off until one exists.
+        // No depth buffer - depth testing stays off until one exists.
+        //
+        // TODO(OM): enable depth testing once a depth buffer exists (needed
+        // once real 3D geometry with occlusion is rendered).
         psoDesc.DepthStencilState.DepthEnable = FALSE;
         psoDesc.DepthStencilState.StencilEnable = FALSE;
         psoDesc.DSVFormat = DXGI_FORMAT_UNKNOWN;
@@ -115,7 +127,48 @@ namespace Renderer
         PipelineHandle handle;
         handle.index = static_cast<int>(g_pipelines.size() - 1);
 
-        Foundation::Log::Write(Foundation::Log::Severity::Info, "Renderer", "Pipeline created (root signature + PSO), handle %d", handle.index);
+        Foundation::Log::Write(
+            Foundation::Log::Severity::Info, "Renderer", "Graphics pipeline created (root signature + PSO), handle %d", handle.index);
+        return handle;
+    }
+
+    PipelineHandle PipelineDX12::CreateCompute(const ComputePipelineDesc& desc)
+    {
+        ID3D12Device* device = DeviceDX12::GetDevice();
+
+        // One UAV descriptor table (u0) - see ComputePipelineDesc.
+        D3D12_DESCRIPTOR_RANGE uavRange = {};
+        uavRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+        uavRange.NumDescriptors = 1;
+        uavRange.BaseShaderRegister = 0;
+        uavRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+        D3D12_ROOT_PARAMETER rootParameter = {};
+        rootParameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        rootParameter.DescriptorTable.NumDescriptorRanges = 1;
+        rootParameter.DescriptorTable.pDescriptorRanges = &uavRange;
+        rootParameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+        D3D12_ROOT_SIGNATURE_DESC rootSignatureDesc = {};
+        rootSignatureDesc.NumParameters = 1;
+        rootSignatureDesc.pParameters = &rootParameter;
+
+        PipelineEntry entry;
+        entry.rootSignature = SerializeAndCreateRootSignature(device, rootSignatureDesc);
+
+        D3D12_COMPUTE_PIPELINE_STATE_DESC psoDesc = {};
+        psoDesc.pRootSignature = entry.rootSignature.Get();
+        psoDesc.CS = { desc.computeShader->bytecode.data(), desc.computeShader->bytecode.size() };
+
+        CheckHr(device->CreateComputePipelineState(&psoDesc, IID_PPV_ARGS(&entry.pso)), "ID3D12Device::CreateComputePipelineState");
+
+        g_pipelines.push_back(entry);
+
+        PipelineHandle handle;
+        handle.index = static_cast<int>(g_pipelines.size() - 1);
+
+        Foundation::Log::Write(
+            Foundation::Log::Severity::Info, "Renderer", "Compute pipeline created (root signature + PSO), handle %d", handle.index);
         return handle;
     }
 

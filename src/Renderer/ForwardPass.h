@@ -10,8 +10,8 @@
 namespace Renderer
 {
     // Draws opaque (and, later, skinned) geometry with lighting computed
-    // directly in the pixel shader - forward, not deferred (see DESIGN.md's
-    // render pass convention section for why). Backend-agnostic front
+    // directly in the pixel shader - forward, not deferred: no G-buffer or
+    // separate lighting pass needed at this scale. Backend-agnostic front
     // layer - see PlatformMacros.h.
     struct ForwardPass : public OMD_GFX_CLASS(ForwardPass)
     {

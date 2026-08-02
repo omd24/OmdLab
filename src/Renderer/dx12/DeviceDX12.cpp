@@ -26,6 +26,15 @@ namespace
     UINT g_rtvDescriptorSize = 0;
     ComPtr<ID3D12Resource> g_backBuffers[kBackBufferCount];
 
+    // Offscreen UAV target for the compute dispatch - D3D12 disallows UAV
+    // usage directly on swap chain back buffers, so a compute pass writes
+    // here and CompositeComputeTarget() copies the result into the actual
+    // back buffer. Single texture, not double-buffered like g_backBuffers:
+    // every frame is already fully waited on (WaitForGpu()) before the
+    // next one starts, so there's no concurrent-access risk.
+    ComPtr<ID3D12Resource> g_computeTarget;
+    ComPtr<ID3D12DescriptorHeap> g_uavHeap;
+
     ComPtr<ID3D12CommandAllocator> g_commandAllocator;
     ComPtr<ID3D12GraphicsCommandList> g_commandList;
 
@@ -45,20 +54,22 @@ namespace
         return handle;
     }
 
-    void TransitionBackBuffer(ID3D12Resource* backBuffer, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after)
+    void TransitionResource(ID3D12Resource* resource, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after)
     {
         D3D12_RESOURCE_BARRIER barrier = {};
         barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        barrier.Transition.pResource = backBuffer;
+        barrier.Transition.pResource = resource;
         barrier.Transition.StateBefore = before;
         barrier.Transition.StateAfter = after;
         barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         g_commandList->ResourceBarrier(1, &barrier);
     }
 
-    // Fully synchronous for now: every frame waits for the GPU to finish
-    // before returning. Correct and simple; multi-frame pipelining is a
-    // later optimization once it actually matters for performance.
+    // Fully synchronous: every frame waits for the GPU to finish before
+    // returning. Correct and simple.
+    //
+    // TODO(OM): pipeline multiple frames in flight once performance
+    // actually demands it.
     void WaitForGpu()
     {
         const UINT64 valueToWaitFor = ++g_fenceValue;
@@ -70,6 +81,7 @@ namespace
             WaitForSingleObject(g_fenceEvent, INFINITE);
         }
     }
+
 }
 
 namespace Renderer
@@ -166,6 +178,32 @@ namespace Renderer
             g_device->CreateRenderTargetView(g_backBuffers[i].Get(), nullptr, RtvHandleFor(i));
         }
 
+        D3D12_HEAP_PROPERTIES computeTargetHeapProps = {};
+        computeTargetHeapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+        D3D12_RESOURCE_DESC computeTargetDesc = {};
+        computeTargetDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        computeTargetDesc.Width = width;
+        computeTargetDesc.Height = height;
+        computeTargetDesc.DepthOrArraySize = 1;
+        computeTargetDesc.MipLevels = 1;
+        computeTargetDesc.Format = kBackBufferFormat;
+        computeTargetDesc.SampleDesc.Count = 1;
+        computeTargetDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+
+        CheckHr(
+            g_device->CreateCommittedResource(
+                &computeTargetHeapProps, D3D12_HEAP_FLAG_NONE, &computeTargetDesc, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
+                IID_PPV_ARGS(&g_computeTarget)),
+            "ID3D12Device::CreateCommittedResource (compute target)");
+
+        D3D12_DESCRIPTOR_HEAP_DESC uavHeapDesc = {};
+        uavHeapDesc.NumDescriptors = 1;
+        uavHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        uavHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        CheckHr(g_device->CreateDescriptorHeap(&uavHeapDesc, IID_PPV_ARGS(&g_uavHeap)), "ID3D12Device::CreateDescriptorHeap (UAV)");
+        g_device->CreateUnorderedAccessView(g_computeTarget.Get(), nullptr, nullptr, g_uavHeap->GetCPUDescriptorHandleForHeapStart());
+
         CheckHr(
             g_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&g_commandAllocator)),
             "ID3D12Device::CreateCommandAllocator");
@@ -194,14 +232,29 @@ namespace Renderer
         CheckHr(g_commandAllocator->Reset(), "ID3D12CommandAllocator::Reset");
         CheckHr(g_commandList->Reset(g_commandAllocator.Get(), nullptr), "ID3D12GraphicsCommandList::Reset");
 
+        // g_computeTarget is always left in UNORDERED_ACCESS state by
+        // CompositeComputeTarget() (or its initial creation state, on the
+        // first frame) - ready to write without a transition here.
+        ID3D12DescriptorHeap* heaps[] = { g_uavHeap.Get() };
+        g_commandList->SetDescriptorHeaps(1, heaps);
+    }
+
+    void DeviceDX12::CompositeComputeTarget()
+    {
         const UINT backBufferIndex = g_swapChain->GetCurrentBackBufferIndex();
         ID3D12Resource* backBuffer = g_backBuffers[backBufferIndex].Get();
 
-        TransitionBackBuffer(backBuffer, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        TransitionResource(g_computeTarget.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        TransitionResource(backBuffer, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_DEST);
+
+        g_commandList->CopyResource(backBuffer, g_computeTarget.Get());
+
+        TransitionResource(backBuffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        // Back to UNORDERED_ACCESS so next frame's BeginFrame() can write
+        // to it again without needing its own transition.
+        TransitionResource(g_computeTarget.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
         const D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = RtvHandleFor(backBufferIndex);
-        const float clearColor[4] = { 0.05f, 0.32f, 0.5f, 1.0f };
-        g_commandList->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
         g_commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
 
         // Required every time the command list records draws - the
@@ -219,7 +272,7 @@ namespace Renderer
         const UINT backBufferIndex = g_swapChain->GetCurrentBackBufferIndex();
         ID3D12Resource* backBuffer = g_backBuffers[backBufferIndex].Get();
 
-        TransitionBackBuffer(backBuffer, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
+        TransitionResource(backBuffer, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
         CheckHr(g_commandList->Close(), "ID3D12GraphicsCommandList::Close");
 
         ID3D12CommandList* commandLists[] = { g_commandList.Get() };
@@ -238,5 +291,20 @@ namespace Renderer
     ID3D12GraphicsCommandList* DeviceDX12::GetCommandList()
     {
         return g_commandList.Get();
+    }
+
+    unsigned long long DeviceDX12::GetComputeTargetUAV()
+    {
+        return g_uavHeap->GetGPUDescriptorHandleForHeapStart().ptr;
+    }
+
+    unsigned int DeviceDX12::GetWidth()
+    {
+        return g_width;
+    }
+
+    unsigned int DeviceDX12::GetHeight()
+    {
+        return g_height;
     }
 }

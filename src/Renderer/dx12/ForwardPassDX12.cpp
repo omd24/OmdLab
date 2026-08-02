@@ -42,17 +42,18 @@ namespace Renderer
             { "COLOR", 0, 3, offsetof(TriangleVertex, color) },
         };
 
-        PipelineDesc pipelineDesc;
+        GraphicsPipelineDesc pipelineDesc;
         pipelineDesc.vertexShader = &vertexShader;
         pipelineDesc.pixelShader = &pixelShader;
         pipelineDesc.vertexAttributes = vertexAttributes;
         pipelineDesc.vertexAttributeCount = static_cast<unsigned int>(std::size(vertexAttributes));
-        g_pipelineHandle = Pipeline::Create(pipelineDesc);
+        g_pipelineHandle = Pipeline::CreateGraphics(pipelineDesc);
 
-        // Clip-space positions directly (no camera/transform yet) - the
-        // simplest possible thing, not the final resource path (see
-        // Buffer.h). Clockwise winding to match the default rasterizer
-        // state's front face.
+        // Clip-space positions directly, no camera/transform. Clockwise
+        // winding to match the default rasterizer state's front face.
+        //
+        // TODO(OM): route through an actual camera/transform once one
+        // exists, instead of hardcoded clip-space positions.
         const TriangleVertex vertices[] = {
             { { 0.0f, 0.5f, 0.0f }, { 1.0f, 0.0f, 0.0f } },
             { { 0.45f, -0.5f, 0.0f }, { 0.0f, 1.0f, 0.0f } },

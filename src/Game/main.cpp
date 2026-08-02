@@ -2,10 +2,7 @@
 #include "Foundation/Debug.h"
 #include "Foundation/Log.h"
 #include "Foundation/Window.h"
-#include "Renderer/Buffer.h"
-#include "Renderer/Device.h"
-#include "Renderer/ForwardPass.h"
-#include "Renderer/Pipeline.h"
+#include "Renderer/RenderTasks.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
@@ -43,20 +40,14 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
         return -1;
     }
 
-    Renderer::Device::Init(window, windowWidth, windowHeight);
-    Renderer::ForwardPass::Init();
+    Renderer::RenderTasks::Init(window, windowWidth, windowHeight);
 
     while (Foundation::PumpMessages())
     {
-        Renderer::Device::BeginFrame();
-        Renderer::ForwardPass::Render({});
-        Renderer::Device::EndFrame();
+        Renderer::RenderTasks::DoFrame();
     }
 
-    Renderer::ForwardPass::Shutdown();
-    Renderer::Pipeline::Shutdown();
-    Renderer::Buffer::Shutdown();
-    Renderer::Device::Shutdown();
+    Renderer::RenderTasks::Shutdown();
     Foundation::Log::Shutdown();
     return 0;
 }

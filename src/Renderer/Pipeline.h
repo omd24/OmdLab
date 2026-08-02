@@ -9,15 +9,20 @@
 
 namespace Renderer
 {
-    // Root signature + PSO registry. Backend-agnostic front layer - see
-    // PlatformMacros.h. Every render pass creates its pipeline(s) through
-    // this instead of hand-rolling its own PSO boilerplate (see DESIGN.md's
-    // render pass convention section).
+    // Root signature + PSO registry, for both graphics and compute
+    // pipelines. Backend-agnostic front layer - see PlatformMacros.h. Every
+    // render pass creates its pipeline(s) through this instead of
+    // hand-rolling its own PSO boilerplate.
     struct Pipeline : public OMD_GFX_CLASS(Pipeline)
     {
-        static PipelineHandle Create(const PipelineDesc& desc)
+        static PipelineHandle CreateGraphics(const GraphicsPipelineDesc& desc)
         {
-            return OMD_GFX_CALL(Pipeline, Create(desc));
+            return OMD_GFX_CALL(Pipeline, CreateGraphics(desc));
+        }
+
+        static PipelineHandle CreateCompute(const ComputePipelineDesc& desc)
+        {
+            return OMD_GFX_CALL(Pipeline, CreateCompute(desc));
         }
 
         static void Shutdown()

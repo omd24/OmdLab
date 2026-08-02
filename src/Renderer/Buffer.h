@@ -16,9 +16,10 @@ namespace Renderer
     // Simplest possible resource path - upload-heap memory is CPU-visible
     // but slower for the GPU to read than a default-heap copy, and this
     // offers no way to update the data after creation. Fine for small,
-    // static, create-once data (the current vertex buffer use); revisit
-    // with a default-heap + upload-copy path once something needs either
-    // large data or per-frame updates.
+    // static, create-once data (the current vertex buffer use).
+    //
+    // TODO(OM): add a default-heap + upload-copy path once something needs
+    // either large data or per-frame updates.
     struct Buffer : public OMD_GFX_CLASS(Buffer)
     {
         static BufferHandle Create(const void* data, size_t sizeBytes)

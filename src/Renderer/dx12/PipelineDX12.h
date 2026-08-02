@@ -9,7 +9,8 @@ namespace Renderer
 {
     struct PipelineDX12
     {
-        static PipelineHandle Create(const PipelineDesc& desc);
+        static PipelineHandle CreateGraphics(const GraphicsPipelineDesc& desc);
+        static PipelineHandle CreateCompute(const ComputePipelineDesc& desc);
         static void Shutdown();
 
         // For other dx12/ backend files (e.g. render passes) that need to

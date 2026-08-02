@@ -27,16 +27,24 @@ namespace Renderer
             OMD_GFX_CALL(Device, Shutdown());
         }
 
-        // Begins a frame: waits for the GPU to be ready for this frame's
-        // resources, resets command recording, and clears the back buffer.
+        // One frame's fixed recipe - see RenderTasks for where these get
+        // called in order, and DeviceDX12.h for what each stage does.
         static void BeginFrame()
         {
             OMD_GFX_CALL(Device, BeginFrame());
         }
 
+        static void CompositeComputeTarget()
+        {
+            OMD_GFX_CALL(Device, CompositeComputeTarget());
+        }
+
         // Ends a frame: closes and submits the command list, presents, and
-        // waits for the GPU to finish (fully synchronous for now - no
-        // multi-frame pipelining yet).
+        // waits for the GPU to finish (fully synchronous - no multi-frame
+        // pipelining).
+        //
+        // TODO(OM): pipeline multiple frames in flight once performance
+        // actually demands it.
         static void EndFrame()
         {
             OMD_GFX_CALL(Device, EndFrame());
