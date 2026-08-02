@@ -8,6 +8,8 @@
 
 namespace
 {
+    HWND g_gameWindow = nullptr;
+
     LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     {
         switch (msg)
@@ -17,6 +19,20 @@ namespace
                 return 0;
         }
         return DefWindowProcA(hwnd, msg, wParam, lParam);
+    }
+
+    // Runs on a dedicated thread the OS creates for console control events - not the main
+    // thread. Console close (or Ctrl+C, logoff, shutdown) would otherwise bypass our own
+    // window's WM_DESTROY entirely and have Windows terminate the process directly, skipping
+    // Device::Shutdown() and leaking GPU resources reported at process teardown. Posting
+    // WM_CLOSE routes it through the same graceful shutdown as closing the game window.
+    BOOL WINAPI ConsoleCtrlHandler(DWORD ctrlType)
+    {
+        if (g_gameWindow != nullptr)
+        {
+            PostMessageA(g_gameWindow, WM_CLOSE, 0, 0);
+        }
+        return TRUE;
     }
 }
 
@@ -78,6 +94,12 @@ namespace Foundation
 
         ShowWindow(hwnd, SW_SHOW);
         UpdateWindow(hwnd);
+
+        g_gameWindow = hwnd;
+        if (!SetConsoleCtrlHandler(ConsoleCtrlHandler, TRUE))
+        {
+            Log::Write(Log::Severity::Warning, "Window", "SetConsoleCtrlHandler registration failed");
+        }
 
         return hwnd;
     }

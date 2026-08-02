@@ -32,8 +32,10 @@
 // Renderer/vulkan/). OMD_GFX_CLASS depends on this naming rule holding for
 // every type; breaking it breaks compilation for that type.
 //
-// See DESIGN.md, "Graphics backend routing convention", for the full
-// rationale.
+// No vulkan/ folder or stub implementation exists yet, and none should be
+// added speculatively - adding a real second backend later only requires
+// an #elif branch here plus populating Renderer/vulkan/; existing
+// front-layer and DX12 code do not need to change.
 
 #if defined(OMD_GFX_DX12)
     #define OMD_GFX_CLASS(name) name##DX12
