@@ -13,7 +13,9 @@ using Microsoft::WRL::ComPtr;
 namespace
 {
     constexpr UINT kBackBufferCount = 2;
-    constexpr DXGI_FORMAT kBackBufferFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+
+    UINT g_width = 0;
+    UINT g_height = 0;
 
     ComPtr<IDXGIFactory6> g_factory;
     ComPtr<ID3D12Device> g_device;
@@ -74,6 +76,9 @@ namespace Renderer
 {
     void DeviceDX12::Init(HWND window, unsigned int width, unsigned int height)
     {
+        g_width = width;
+        g_height = height;
+
 #if defined(OMD_DEBUG)
         {
             ComPtr<ID3D12Debug> debugController;
@@ -198,6 +203,15 @@ namespace Renderer
         const float clearColor[4] = { 0.05f, 0.32f, 0.5f, 1.0f };
         g_commandList->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
         g_commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
+
+        // Required every time the command list records draws - the
+        // rasterizer clips away all geometry without an explicit
+        // viewport/scissor rect, regardless of the render target's own
+        // size (this has no default).
+        const D3D12_VIEWPORT viewport = { 0.0f, 0.0f, static_cast<float>(g_width), static_cast<float>(g_height), 0.0f, 1.0f };
+        const D3D12_RECT scissorRect = { 0, 0, static_cast<LONG>(g_width), static_cast<LONG>(g_height) };
+        g_commandList->RSSetViewports(1, &viewport);
+        g_commandList->RSSetScissorRects(1, &scissorRect);
     }
 
     void DeviceDX12::EndFrame()
@@ -214,5 +228,15 @@ namespace Renderer
         CheckHr(g_swapChain->Present(1, 0), "IDXGISwapChain::Present");
 
         WaitForGpu();
+    }
+
+    ID3D12Device* DeviceDX12::GetDevice()
+    {
+        return g_device.Get();
+    }
+
+    ID3D12GraphicsCommandList* DeviceDX12::GetCommandList()
+    {
+        return g_commandList.Get();
     }
 }

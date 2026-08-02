@@ -2,8 +2,10 @@
 #include "Foundation/Debug.h"
 #include "Foundation/Log.h"
 #include "Foundation/Window.h"
+#include "Renderer/Buffer.h"
 #include "Renderer/Device.h"
-#include "Renderer/Shader.h"
+#include "Renderer/ForwardPass.h"
+#include "Renderer/Pipeline.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
@@ -42,18 +44,18 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     }
 
     Renderer::Device::Init(window, windowWidth, windowHeight);
-
-    Renderer::CompiledShader triangleVs = Renderer::Shader::CompileShader("data/shaders/Triangle.hlsl", "VSMain", "vs_6_0");
-    OMD_ASSERT(!triangleVs.bytecode.empty(), "Triangle vertex shader failed to compile");
-    Renderer::CompiledShader trianglePs = Renderer::Shader::CompileShader("data/shaders/Triangle.hlsl", "PSMain", "ps_6_0");
-    OMD_ASSERT(!trianglePs.bytecode.empty(), "Triangle pixel shader failed to compile");
+    Renderer::ForwardPass::Init();
 
     while (Foundation::PumpMessages())
     {
         Renderer::Device::BeginFrame();
+        Renderer::ForwardPass::Render({});
         Renderer::Device::EndFrame();
     }
 
+    Renderer::ForwardPass::Shutdown();
+    Renderer::Pipeline::Shutdown();
+    Renderer::Buffer::Shutdown();
     Renderer::Device::Shutdown();
     Foundation::Log::Shutdown();
     return 0;
