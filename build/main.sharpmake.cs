@@ -116,7 +116,7 @@ public class Game : OmdLabProjectBase
         conf.VcxprojUserFile.LocalDebuggerWorkingDirectory = @"[project.SharpmakeCsPath]/..";
 
         conf.AddPublicDependency<Engine>(target);
-        conf.Options.Add(Options.Vc.Linker.SubSystem.Console);
+        conf.Options.Add(Options.Vc.Linker.SubSystem.Windows);
     }
 }
 

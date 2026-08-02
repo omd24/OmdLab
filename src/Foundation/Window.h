@@ -1,0 +1,23 @@
+#pragma once
+
+#ifdef OMD_WINDOWS
+    #define WIN32_LEAN_AND_MEAN
+    #include <Windows.h>
+#endif
+
+namespace Foundation
+{
+    // Allocates a console window and redirects stdin/stdout/stderr onto it. Without this,
+    // stdout is not a valid handle under the Windows subsystem, so Log's console sink would
+    // silently go nowhere.
+    void CreateDebugConsole(const char* title);
+
+#ifdef OMD_WINDOWS
+    // Creates and shows a top-level game window. Returns null on failure.
+    HWND CreateGameWindow(const char* title, int width, int height);
+
+    // Pumps pending Win32 messages without blocking. Returns false once WM_QUIT has been
+    // posted (e.g. the window was closed), true otherwise.
+    bool PumpMessages();
+#endif
+}
