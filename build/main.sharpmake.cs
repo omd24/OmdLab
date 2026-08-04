@@ -119,6 +119,12 @@ public class Asset : OmdLabProjectBase
     {
         base.ConfigureAll(conf, target);
         conf.AddPublicDependency<Foundation>(target);
+
+        // cgltf (vendored under thirdParty/cgltf/, pinned to tag v1.15 - see
+        // thirdParty/cgltf/LICENSE) is a single header, so it only needs an include path,
+        // no AdditionalSourceRootPaths entry like ImGui's - GltfImporter.cpp is the one
+        // translation unit that defines CGLTF_IMPLEMENTATION.
+        conf.IncludePaths.Add(@"[project.SharpmakeCsPath]/../thirdParty/cgltf");
     }
 }
 

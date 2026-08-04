@@ -50,3 +50,10 @@ graph BT
 ## Status
 
 Work in progress.
+
+## License
+
+Source code is licensed under the [MIT License](LICENSE). This does not
+cover everything in the repository — see [NOTICE.md](NOTICE.md) for
+vendored third-party code and data assets under their own separate
+licenses.
