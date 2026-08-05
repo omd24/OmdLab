@@ -20,7 +20,7 @@ NOTES/
 .vs/
 *.vcxproj.user
 
-# Stray build artifacts outside tmp/bin (safety net) - vendored thirdParty binaries excluded
+# Stray build artifacts outside tmp/bin - vendored thirdParty binaries excluded
 *.pdb
 *.ilk
 *.exe

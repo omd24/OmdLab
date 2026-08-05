@@ -22,6 +22,14 @@ namespace Renderer
         BufferHandle indexBuffer;
         unsigned int indexCount = 0;
         TextureHandle baseColorTexture;
-        DirectX::XMFLOAT4X4 world;
+        // A buffer the caller creates once (Buffer::Create), holding just this item's world
+        // matrix - not a raw XMFLOAT4X4 re-uploaded into one shared buffer at draw time. A
+        // single shared upload buffer, Update()-d once per item inside one pass's draw loop,
+        // is only actually written by the CPU before the GPU executes any of that frame's
+        // recorded commands - every draw in the list would end up reading whichever item's
+        // matrix was written last, not its own (a real bug this shape once had, caught when a
+        // second content category was added to the same draw list). Each item owning its own
+        // buffer, exactly like vertexBuffer/indexBuffer already do, has no such hazard.
+        BufferHandle worldBuffer;
     };
 }

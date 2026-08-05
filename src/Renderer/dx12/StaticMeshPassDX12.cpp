@@ -30,7 +30,6 @@ namespace
 
     Renderer::PipelineHandle g_pipelineHandle;
     Renderer::BufferHandle g_cameraBufferHandle;
-    Renderer::BufferHandle g_worldBufferHandle;
     std::vector<Renderer::StaticMeshDrawItem> g_drawItems;
 }
 
@@ -71,7 +70,6 @@ namespace Renderer
         DirectX::XMFLOAT4X4 identity;
         DirectX::XMStoreFloat4x4(&identity, DirectX::XMMatrixIdentity());
         g_cameraBufferHandle = Buffer::Create(&identity, sizeof(identity));
-        g_worldBufferHandle = Buffer::Create(&identity, sizeof(identity));
 
         Foundation::Log::Write(Foundation::Log::Severity::Info, "Renderer", "Static mesh pass initialized");
     }
@@ -108,8 +106,7 @@ namespace Renderer
 
         for (const StaticMeshDrawItem& item : g_drawItems)
         {
-            Buffer::Update(g_worldBufferHandle, &item.world, sizeof(item.world));
-            cmdList->SetGraphicsRootConstantBufferView(1, BufferDX12::GetResource(g_worldBufferHandle)->GetGPUVirtualAddress());
+            cmdList->SetGraphicsRootConstantBufferView(1, BufferDX12::GetResource(item.worldBuffer)->GetGPUVirtualAddress());
             cmdList->SetGraphicsRootDescriptorTable(2, D3D12_GPU_DESCRIPTOR_HANDLE{ TextureDX12::GetSrvGpuHandle(item.baseColorTexture) });
 
             D3D12_VERTEX_BUFFER_VIEW vertexBufferView = {};
