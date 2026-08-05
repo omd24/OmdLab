@@ -1,9 +1,12 @@
-# Private design scratchpad - not tracked
+# design scratchpad - not tracked
 DESIGN*.md
 NOTES/
 
-# Local asset-pipeline tooling - not tracked
+# local asset-pipeline tooling - not tracked
 /scripts/
+
+# misc - not tracked
+/local/
 
 # Sharpmake-generated solution/build output (regenerate via GenerateSolution.bat)
 /projects/

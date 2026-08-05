@@ -60,5 +60,18 @@ namespace Renderer
         {
             OMD_GFX_CALL(Device, EndFrame());
         }
+
+        // Current back buffer size - tracks live window resizes, not just
+        // the size passed to Init(). For callers (e.g. a camera's aspect
+        // ratio) that need to stay correct across a resize.
+        static unsigned int GetWidth()
+        {
+            return OMD_GFX_CALL(Device, GetWidth());
+        }
+
+        static unsigned int GetHeight()
+        {
+            return OMD_GFX_CALL(Device, GetHeight());
+        }
     };
 }

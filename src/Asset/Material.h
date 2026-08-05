@@ -6,6 +6,13 @@
 
 namespace Asset
 {
+    enum class AlphaMode
+    {
+        Opaque, // Alpha ignored entirely - the glTF default.
+        Mask,   // Alpha-tested cutout against alphaCutoff (foliage, chain-link, ...).
+        Blend,  // Real alpha blending.
+    };
+
     // One glTF material, kept close to glTF's own metallic-roughness model since that's the
     // only source format this engine imports today (see the Asset format extensibility
     // decision - a future non-glTF importer would populate the same fields from whatever its
@@ -27,5 +34,9 @@ namespace Asset
         int32_t normalTexture = kInvalidIndex;
         int32_t metallicRoughnessTexture = kInvalidIndex;
         int32_t emissiveTexture = kInvalidIndex;
+
+        AlphaMode alphaMode = AlphaMode::Opaque;
+        float alphaCutoff = 0.5f; // glTF's own spec default; only meaningful under Mask.
+        bool doubleSided = false;
     };
 }

@@ -11,6 +11,7 @@ namespace Renderer
     struct BufferDX12
     {
         static BufferHandle Create(const void* data, size_t sizeBytes);
+        static void Update(BufferHandle handle, const void* data, size_t sizeBytes);
         static void Shutdown();
 
         // For other dx12/ backend files (e.g. render passes) that need to

@@ -71,8 +71,49 @@ namespace Renderer
     {
         ID3D12Device* device = DeviceDX12::GetDevice();
 
-        // No CBV/SRV/UAV/samplers - see GraphicsPipelineDesc.
+        // One root parameter per requested constant buffer, at b0, b1, ... - see
+        // GraphicsPipelineDesc - plus, if requested, one SRV descriptor table at t0 with a
+        // static sampler at s0.
+        std::vector<D3D12_ROOT_PARAMETER> rootParameters(desc.constantBufferCount);
+        for (unsigned int i = 0; i < desc.constantBufferCount; ++i)
+        {
+            rootParameters[i].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+            rootParameters[i].Descriptor.ShaderRegister = i;
+            rootParameters[i].Descriptor.RegisterSpace = 0;
+            rootParameters[i].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+        }
+
+        D3D12_DESCRIPTOR_RANGE srvRange = {};
+        D3D12_STATIC_SAMPLER_DESC staticSampler = {};
+        if (desc.srvCount > 0)
+        {
+            srvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+            srvRange.NumDescriptors = desc.srvCount;
+            srvRange.BaseShaderRegister = 0;
+            srvRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+            D3D12_ROOT_PARAMETER srvTableParameter = {};
+            srvTableParameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            srvTableParameter.DescriptorTable.NumDescriptorRanges = 1;
+            srvTableParameter.DescriptorTable.pDescriptorRanges = &srvRange;
+            srvTableParameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+            rootParameters.push_back(srvTableParameter);
+
+            staticSampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+            staticSampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+            staticSampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+            staticSampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+            staticSampler.MaxLOD = D3D12_FLOAT32_MAX;
+            staticSampler.ShaderRegister = 0;
+            staticSampler.RegisterSpace = 0;
+            staticSampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        }
+
         D3D12_ROOT_SIGNATURE_DESC rootSignatureDesc = {};
+        rootSignatureDesc.NumParameters = static_cast<UINT>(rootParameters.size());
+        rootSignatureDesc.pParameters = rootParameters.empty() ? nullptr : rootParameters.data();
+        rootSignatureDesc.NumStaticSamplers = desc.srvCount > 0 ? 1 : 0;
+        rootSignatureDesc.pStaticSamplers = desc.srvCount > 0 ? &staticSampler : nullptr;
         rootSignatureDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
 
         PipelineEntry entry;
@@ -101,18 +142,19 @@ namespace Renderer
         psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
 
         psoDesc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-        psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
+        psoDesc.RasterizerState.CullMode = desc.cullBackFaces ? D3D12_CULL_MODE_BACK : D3D12_CULL_MODE_NONE;
         psoDesc.RasterizerState.DepthClipEnable = TRUE;
 
         psoDesc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
 
-        // No depth buffer - depth testing stays off until one exists.
-        //
-        // TODO(OM): enable depth testing once a depth buffer exists (needed
-        // once real 3D geometry with occlusion is rendered).
-        psoDesc.DepthStencilState.DepthEnable = FALSE;
+        psoDesc.DepthStencilState.DepthEnable = desc.depthTestEnabled ? TRUE : FALSE;
+        psoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+        psoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
         psoDesc.DepthStencilState.StencilEnable = FALSE;
-        psoDesc.DSVFormat = DXGI_FORMAT_UNKNOWN;
+        // A DSVFormat other than UNKNOWN is only valid when depth testing is
+        // actually enabled - D3D12 requires DepthEnable == FALSE to pair with
+        // DXGI_FORMAT_UNKNOWN specifically.
+        psoDesc.DSVFormat = desc.depthTestEnabled ? kDepthBufferFormat : DXGI_FORMAT_UNKNOWN;
 
         psoDesc.SampleMask = UINT_MAX;
         psoDesc.SampleDesc.Count = 1;

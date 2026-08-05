@@ -15,6 +15,10 @@ namespace Renderer
     // build resource descs against the actual swap chain format.
     constexpr DXGI_FORMAT kBackBufferFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
 
+    // Shared with PipelineDX12, which needs it for a depth-tested PSO's
+    // DSVFormat to match the actual depth buffer.
+    constexpr DXGI_FORMAT kDepthBufferFormat = DXGI_FORMAT_D32_FLOAT;
+
     struct DeviceDX12
     {
         static void Init(HWND window, unsigned int width, unsigned int height);

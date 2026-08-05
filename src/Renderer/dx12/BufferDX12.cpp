@@ -61,6 +61,23 @@ namespace Renderer
         return handle;
     }
 
+    // Safe to Map/memcpy/Unmap directly with no extra synchronization only
+    // because every frame is already fully waited on before the next one's
+    // CPU work starts (see DeviceDX12's WaitForGpu) - the GPU is never still
+    // reading this buffer when this runs. Would need real synchronization
+    // (e.g. per-frame-in-flight buffer copies) if that ever changes.
+    void BufferDX12::Update(BufferHandle handle, const void* data, size_t sizeBytes)
+    {
+        OMD_ASSERT(handle.index >= 0 && static_cast<size_t>(handle.index) < g_buffers.size(), "Invalid BufferHandle");
+        ID3D12Resource* resource = g_buffers[handle.index].Get();
+
+        void* mapped = nullptr;
+        const D3D12_RANGE noRead = { 0, 0 };
+        CheckHr(resource->Map(0, &noRead, &mapped), "ID3D12Resource::Map (update)");
+        memcpy(mapped, data, sizeBytes);
+        resource->Unmap(0, nullptr);
+    }
+
     void BufferDX12::Shutdown()
     {
         g_buffers.clear();

@@ -81,8 +81,8 @@ namespace
             {
                 // Embedded (data-URI or .glb buffer-view) images have no on-disk file path.
                 // TODO(OM): support embedded image data once a source asset actually uses it -
-                // the Sponza validation milestone (see DESIGN.md) is expected to use loose
-                // texture files, not embedded ones, so this hasn't come up yet.
+                // every source asset tested so far uses loose texture files, not embedded
+                // ones, so this hasn't come up yet.
                 Foundation::Log::Write(Severity::Warning, "Asset", "Texture %zu has no file URI (embedded image?); leaving its path empty", i);
             }
         }
@@ -111,6 +111,15 @@ namespace
             std::memcpy(outMaterial.emissiveFactor, material.emissive_factor, sizeof(outMaterial.emissiveFactor));
             outMaterial.normalTexture = TextureIndex(data, material.normal_texture);
             outMaterial.emissiveTexture = TextureIndex(data, material.emissive_texture);
+
+            switch (material.alpha_mode)
+            {
+                case cgltf_alpha_mode_mask: outMaterial.alphaMode = Asset::AlphaMode::Mask; break;
+                case cgltf_alpha_mode_blend: outMaterial.alphaMode = Asset::AlphaMode::Blend; break;
+                default: outMaterial.alphaMode = Asset::AlphaMode::Opaque; break;
+            }
+            outMaterial.alphaCutoff = material.alpha_cutoff;
+            outMaterial.doubleSided = material.double_sided != 0;
         }
     }
 

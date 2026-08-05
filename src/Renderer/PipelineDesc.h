@@ -17,16 +17,34 @@ namespace Renderer
     };
 
     // Describes one graphics root signature + PSO. Shader bytecode and
-    // vertex layout only - no resource bindings beyond the input assembler.
-    //
-    // TODO(OM): add CBV/SRV/UAV/sampler bindings once a pass needs any
-    // (e.g. a camera constant buffer, a material texture).
+    // vertex layout, plus how many root constant-buffer parameters the
+    // shaders expect (bound at b0, b1, ... in that order, visible to both
+    // vertex and pixel stages - no per-stage split needed at this scale).
     struct GraphicsPipelineDesc
     {
         const CompiledShader* vertexShader = nullptr;
         const CompiledShader* pixelShader = nullptr;
         const VertexAttribute* vertexAttributes = nullptr;
         unsigned int vertexAttributeCount = 0;
+        unsigned int constantBufferCount = 0;
+
+        // 0 = no SRV descriptor table (and no sampler). >0 = one descriptor table at t0..,
+        // this many descriptors, plus one static bilinear-wrap sampler at s0 - the one shape
+        // needed so far (a material's base color texture, srvCount == 1 - the table's GPU
+        // base handle gets re-pointed at whichever texture's descriptor a given draw needs,
+        // via SetGraphicsRootDescriptorTable, rather than one large persistent table covering
+        // every texture at once).
+        unsigned int srvCount = 0;
+
+        // Off by default - the 2D-ish flat-color triangle this project started
+        // with has no use for it. Real 3D geometry with self-occlusion needs it on.
+        bool depthTestEnabled = false;
+
+        // On by default (standard back-face culling). Off entirely disables culling for
+        // every draw using this PSO - a pass-wide switch, not per-material; a pass whose
+        // source data mixes single-sided and double-sided materials (see
+        // Asset::Material::doubleSided) needs two PSOs and to pick per draw item, not this.
+        bool cullBackFaces = true;
     };
 
     // Describes one compute root signature + PSO. Root signature is fixed

@@ -27,6 +27,12 @@ namespace
     UINT g_rtvDescriptorSize = 0;
     ComPtr<ID3D12Resource> g_backBuffers[kBackBufferCount];
 
+    // Single depth buffer, not double-buffered - same reasoning as
+    // g_computeTarget: every frame is fully waited on before the next
+    // starts, so there's no concurrent-access risk to guard against.
+    ComPtr<ID3D12Resource> g_depthBuffer;
+    ComPtr<ID3D12DescriptorHeap> g_dsvHeap;
+
     // Offscreen UAV target for the compute dispatch - D3D12 disallows UAV
     // usage directly on swap chain back buffers, so a compute pass writes
     // here and CompositeComputeTarget() copies the result into the actual
@@ -68,11 +74,17 @@ namespace
 
     // Shared by CompositeComputeTarget()/ClearAndBindRenderTarget() - both
     // end with the back buffer already transitioned into
-    // D3D12_RESOURCE_STATE_RENDER_TARGET and just need it bound.
+    // D3D12_RESOURCE_STATE_RENDER_TARGET and just need it bound. The depth
+    // buffer is cleared and bound unconditionally alongside it, regardless
+    // of which of the two callers ran - cheap, and keeps it in a known-clear
+    // state for whatever draws happen this frame, the same reasoning
+    // already applied to viewport/scissor below.
     void BindBackBufferAsRenderTarget(UINT backBufferIndex)
     {
         const D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = RtvHandleFor(backBufferIndex);
-        g_commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
+        const D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = g_dsvHeap->GetCPUDescriptorHandleForHeapStart();
+        g_commandList->ClearDepthStencilView(dsvHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+        g_commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, &dsvHandle);
 
         // Required every time the command list records draws - the
         // rasterizer clips away all geometry without an explicit
@@ -139,6 +151,36 @@ namespace
         g_device->CreateUnorderedAccessView(g_computeTarget.Get(), nullptr, nullptr, g_uavHeap->GetCPUDescriptorHandleForHeapStart());
     }
 
+    // Shared by Init() and ResizeIfNeeded() - (re)creates the depth buffer
+    // at the given size and points the existing DSV heap slot at it.
+    void CreateDepthBufferAndDsv(UINT width, UINT height)
+    {
+        D3D12_HEAP_PROPERTIES heapProps = {};
+        heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+        D3D12_RESOURCE_DESC resourceDesc = {};
+        resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        resourceDesc.Width = width;
+        resourceDesc.Height = height;
+        resourceDesc.DepthOrArraySize = 1;
+        resourceDesc.MipLevels = 1;
+        resourceDesc.Format = Renderer::kDepthBufferFormat;
+        resourceDesc.SampleDesc.Count = 1;
+        resourceDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+
+        D3D12_CLEAR_VALUE clearValue = {};
+        clearValue.Format = Renderer::kDepthBufferFormat;
+        clearValue.DepthStencil.Depth = 1.0f;
+
+        CheckHr(
+            g_device->CreateCommittedResource(
+                &heapProps, D3D12_HEAP_FLAG_NONE, &resourceDesc, D3D12_RESOURCE_STATE_DEPTH_WRITE, &clearValue,
+                IID_PPV_ARGS(&g_depthBuffer)),
+            "ID3D12Device::CreateCommittedResource (depth buffer)");
+
+        g_device->CreateDepthStencilView(g_depthBuffer.Get(), nullptr, g_dsvHeap->GetCPUDescriptorHandleForHeapStart());
+    }
+
     // Polled once per frame from BeginFrame() rather than driven by a
     // WM_SIZE hook - GetClientRect is cheap, and this avoids adding a
     // second Foundation::Window hook alongside the message hook ImGui
@@ -162,12 +204,14 @@ namespace
             g_backBuffers[i].Reset();
         }
         g_computeTarget.Reset();
+        g_depthBuffer.Reset();
 
         CheckHr(
             g_swapChain->ResizeBuffers(kBackBufferCount, newWidth, newHeight, Renderer::kBackBufferFormat, 0), "IDXGISwapChain::ResizeBuffers");
 
         CreateBackBuffersAndRtvs();
         CreateComputeTargetAndUav(newWidth, newHeight);
+        CreateDepthBufferAndDsv(newWidth, newHeight);
 
         g_width = newWidth;
         g_height = newHeight;
@@ -273,6 +317,12 @@ namespace Renderer
         uavHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         CheckHr(g_device->CreateDescriptorHeap(&uavHeapDesc, IID_PPV_ARGS(&g_uavHeap)), "ID3D12Device::CreateDescriptorHeap (UAV)");
         CreateComputeTargetAndUav(width, height);
+
+        D3D12_DESCRIPTOR_HEAP_DESC dsvHeapDesc = {};
+        dsvHeapDesc.NumDescriptors = 1;
+        dsvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+        CheckHr(g_device->CreateDescriptorHeap(&dsvHeapDesc, IID_PPV_ARGS(&g_dsvHeap)), "ID3D12Device::CreateDescriptorHeap (DSV)");
+        CreateDepthBufferAndDsv(width, height);
 
         CheckHr(
             g_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&g_commandAllocator)),

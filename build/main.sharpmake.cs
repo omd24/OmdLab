@@ -165,6 +165,12 @@ public class Game : OmdLabProjectBase
         conf.ReferencesByNuGetPackage.Add("Microsoft.Direct3D.D3D12", AgilitySdk.NuGetVersion);
         conf.CustomProperties.Add("Microsoft_Direct3D_D3D12_D3D12SDKPath", AgilitySdk.SdkPath);
         conf.ReferencesByNuGetPackage.Add("Microsoft.Direct3D.DXC", Dxc.NuGetVersion);
+
+        // stb_image (vendored under thirdParty/stb/, v2.30 - public domain/MIT dual license
+        // embedded directly in the header), for LocalTestScene.cpp's temporary Asset-to-Renderer
+        // texture-loading glue - Renderer's own Texture::Create takes already-decoded pixels
+        // and has no use for an image-decoding library itself.
+        conf.IncludePaths.Add(@"[project.SharpmakeCsPath]/../thirdParty/stb");
     }
 }
 

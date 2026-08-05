@@ -27,8 +27,9 @@ namespace Asset
     };
 
     // One glTF mesh primitive - its own vertex/index buffer and its own material, so a mesh
-    // with multiple materials (typical for a real scene like Sponza, not just this project's
-    // single-material stick-figure pieces) is representable without splitting Mesh itself.
+    // with multiple materials (typical for a large multi-material scene, not just this
+    // project's single-material stick-figure pieces) is representable without splitting Mesh
+    // itself.
     struct Primitive
     {
         std::vector<Vertex> vertices;
