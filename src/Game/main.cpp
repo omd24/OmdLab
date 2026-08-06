@@ -1,5 +1,7 @@
 #include "Asset/GltfImporter.h"
+#include "Engine/Animation.h"
 #include "Engine/Camera.h"
+#include "Engine/ClipPlayback.h"
 #include "Engine/Engine.h"
 #include "Engine/ModelResources.h"
 #include "Foundation/Debug.h"
@@ -51,12 +53,12 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
 
     Renderer::RenderTasks::Init(window, windowWidth, windowHeight);
 
-    // Character asset, in bind pose (no animation yet - see the incremental plan's step 11).
-    // Engine's connective resource layer does the Asset-CPU-data-to-Renderer-GPU-resource
-    // translation, the same generic path the local test scene below also goes through.
+    // Character asset, currently rendered in bind pose. Engine's connective resource layer
+    // does the Asset-CPU-data-to-Renderer-GPU-resource translation, the same generic path the
+    // local test scene below also goes through.
     constexpr const char* kCharacterDirectory = "data/characters/polyone_stick_man";
     Asset::Model characterModel;
-    std::vector<Renderer::StaticMeshDrawItem> characterDrawItems;
+    std::vector<Renderer::SkinnedMeshDrawItem> characterDrawItems;
     if (Asset::ImportGltf("data/characters/polyone_stick_man/StickMan.glb", characterModel))
     {
         // Correction for this specific source file: Sketchfab's FBX-to-glTF conversion wraps
@@ -67,35 +69,49 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
         // own (a legitimately tiny model is indistinguishable from this from the geometry
         // alone) - a caller-known correction for this asset, per rootTransform's own contract.
         const DirectX::XMMATRIX characterRootTransform = DirectX::XMMatrixScaling(100.0f, 100.0f, 100.0f);
-        characterDrawItems = Engine::CreateStaticMeshDrawItems(characterModel, kCharacterDirectory, characterRootTransform);
+        characterDrawItems = Engine::CreateSkinnedMeshDrawItems(characterModel, kCharacterDirectory, characterRootTransform);
+    }
+
+    // Resolved once, reused every frame below - the skinned mesh node's own skin (this asset
+    // has exactly one). Null when absent (e.g. a future non-animated skinned asset), in which
+    // case the pose update below is just skipped and the character stays in the identity bind
+    // pose CreateSkinnedMeshDrawItems already left it in.
+    const Asset::Skin* characterSkin = nullptr;
+    for (const Asset::Node& node : characterModel.nodes)
+    {
+        if (node.skinIndex != Asset::kInvalidIndex)
+        {
+            characterSkin = &characterModel.skins[node.skinIndex];
+            break;
+        }
+    }
+    Engine::ClipPlayback characterPlayback;
+    // Debug-UI clip combo contents - built once since Asset::Clip::name (and characterModel
+    // itself) don't change after import.
+    std::vector<const char*> characterClipNames;
+    for (const Asset::Clip& clip : characterModel.clips)
+    {
+        characterClipNames.push_back(clip.name.c_str());
     }
 
     // Dev-only stress-test content (see the "Bulk external test content" working convention) -
     // empty (and a no-op) when local/ isn't present.
     std::vector<Renderer::StaticMeshDrawItem> localTestSceneDrawItems = LocalTestScene::LoadIfAvailable();
 
-    // Both categories feed the one shared Renderer::StaticMeshPass draw item list -
-    // StaticMeshPass itself never learns a "character" or "local test scene" exists (the
-    // Renderer/Asset dependency rule), it only ever sees the combined StaticMeshDrawItem
-    // list. Which categories are actually included is a Game-owned decision, re-applied
-    // whenever the debug checkboxes below change - cheap, since the underlying GPU buffers/
-    // textures were already uploaded once above and this only rebuilds the item list.
+    // The character (GPU-skinned) and local test scene (rigid) are different draw item types
+    // feeding different passes - StaticMeshPass/SkinnedMeshPass never learn a "character" or
+    // "local test scene" exists (the Renderer/Asset dependency rule), each only ever sees its
+    // own flat draw item list. Which categories are actually included is a Game-owned decision,
+    // re-applied whenever the debug checkboxes below change - cheap, since the underlying GPU
+    // buffers/textures were already uploaded once above and this only rebuilds the item lists.
     bool enableCharacter = true;
     // Off by default - dev-only content (see the "Bulk external test content" working
     // convention), not something the default view should depend on.
     bool enableLocalTestScene = false;
     auto rebuildDrawItems = [&]()
     {
-        std::vector<Renderer::StaticMeshDrawItem> combined;
-        if (enableCharacter)
-        {
-            combined.insert(combined.end(), characterDrawItems.begin(), characterDrawItems.end());
-        }
-        if (enableLocalTestScene)
-        {
-            combined.insert(combined.end(), localTestSceneDrawItems.begin(), localTestSceneDrawItems.end());
-        }
-        Renderer::StaticMeshPass::SetDrawItems(combined);
+        Renderer::SkinnedMeshPass::SetDrawItems(enableCharacter ? characterDrawItems : std::vector<Renderer::SkinnedMeshDrawItem>{});
+        Renderer::StaticMeshPass::SetDrawItems(enableLocalTestScene ? localTestSceneDrawItems : std::vector<Renderer::StaticMeshDrawItem>{});
     };
     rebuildDrawItems();
 
@@ -112,6 +128,19 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
         const float aspectRatio = static_cast<float>(Renderer::Device::GetWidth()) / static_cast<float>(Renderer::Device::GetHeight());
         const DirectX::XMFLOAT4X4 viewProjection = Engine::ComputeViewProjection(camera, aspectRatio);
 
+        // rootTransform/meshWorldTransform are both Identity here, not characterRootTransform -
+        // see Engine::ComputeSkinningMatrices's own comment for why this asset's skin data
+        // specifically needs that. Runs every frame regardless of ClipPlayback::playing so a
+        // paused clip still renders its current (frozen) pose rather than disappearing.
+        if (characterSkin != nullptr && !characterModel.clips.empty() && !characterDrawItems.empty())
+        {
+            const Asset::Clip& clip = characterModel.clips[characterPlayback.clipIndex];
+            characterPlayback.Advance(deltaSeconds, clip.durationSeconds);
+            Engine::UpdateSkinnedPose(
+                characterModel, *characterSkin, clip, characterPlayback.playbackTimeSeconds, DirectX::XMMatrixIdentity(),
+                DirectX::XMMatrixIdentity(), characterDrawItems[0]);
+        }
+
         // Character is real, shipped content - shown above RenderTasks' own "Debug" section,
         // not inside it. Local test scene is dev-only content (see the "Bulk external test
         // content" working convention), grouped with RenderTasks' own bring-up toggles
@@ -123,6 +152,16 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
             if (ImGui::Checkbox("Character", &enableCharacter))
             {
                 rebuildDrawItems();
+            }
+            if (!characterClipNames.empty())
+            {
+                int clipIndex = characterPlayback.clipIndex;
+                if (ImGui::Combo("Clip", &clipIndex, characterClipNames.data(), static_cast<int>(characterClipNames.size())))
+                {
+                    characterPlayback.clipIndex = clipIndex;
+                    characterPlayback.playbackTimeSeconds = 0.0f;
+                }
+                ImGui::Checkbox("Playing", &characterPlayback.playing);
             }
         };
         auto debugSectionUI = [&]()

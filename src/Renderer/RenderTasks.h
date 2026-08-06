@@ -8,6 +8,7 @@
 #include "ImGuiHelper.h"
 #include "Pipeline.h"
 #include "PlatformMacros.h"
+#include "SkinnedMeshPass.h"
 #include "StaticMeshPass.h"
 #include "Texture.h"
 
@@ -48,12 +49,14 @@ namespace Renderer
             BackgroundPass::Init();
             ForwardPass::Init();
             StaticMeshPass::Init();
+            SkinnedMeshPass::Init();
             ImGuiHelper::Init(window);
         }
 
         static void Shutdown()
         {
             ImGuiHelper::Shutdown();
+            SkinnedMeshPass::Shutdown();
             StaticMeshPass::Shutdown();
             ForwardPass::Shutdown();
             BackgroundPass::Shutdown();
@@ -157,6 +160,7 @@ namespace Renderer
             // easy-to-desync way to hide the same content the caller's own draw-item
             // selection (see extraDebugUI above) already controls.
             StaticMeshPass::Render({ viewProjection });
+            SkinnedMeshPass::Render({ viewProjection });
             ImGuiHelper::Render();
             Device::EndFrame();
 
