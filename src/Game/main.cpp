@@ -3,11 +3,14 @@
 #include "Engine/Camera.h"
 #include "Engine/ClipPlayback.h"
 #include "Engine/Engine.h"
+#include "Engine/FixedTimestep.h"
+#include "Engine/Input.h"
 #include "Engine/ModelResources.h"
 #include "Foundation/Debug.h"
 #include "Foundation/Log.h"
 #include "Foundation/Window.h"
 #include "Renderer/RenderTasks.h"
+#include "InputBindings.h"
 #include "LocalTestScene.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -15,6 +18,7 @@
 
 #include <DirectXMath.h>
 #include <chrono>
+#include <cstdio>
 #include <imgui.h>
 #include <vector>
 
@@ -116,6 +120,14 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     rebuildDrawItems();
 
     Engine::Camera camera;
+    // Fixed-timestep sim loop skeleton - no sim state exists yet to actually drive with this;
+    // it proves ticks run at a fixed rate decoupled from render rate, and that a per-tick
+    // InputCommand is produced and stored, ahead of a real fighter state machine becoming the
+    // first real tick consumer.
+    Engine::FixedTimestepAccumulator simClock;
+    Engine::InputHistory playerInputHistory;
+    Engine::InputCommand lastInputCommand;
+    const Engine::InputBindings fighterBindings = Game::MakeDefaultFighterBindings();
     auto lastFrameTime = std::chrono::steady_clock::now();
 
     while (Foundation::PumpMessages())
@@ -127,6 +139,15 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
         Engine::UpdateFreeFlyCamera(camera, window, deltaSeconds);
         const float aspectRatio = static_cast<float>(Renderer::Device::GetWidth()) / static_cast<float>(Renderer::Device::GetHeight());
         const DirectX::XMFLOAT4X4 viewProjection = Engine::ComputeViewProjection(camera, aspectRatio);
+
+        simClock.BeginFrame(deltaSeconds);
+        while (simClock.TryConsumeTick())
+        {
+            lastInputCommand = Engine::AssembleInputCommand(simClock.tickCount, fighterBindings, lastInputCommand, /*gamepadIndex*/ 0);
+            playerInputHistory.Push(lastInputCommand);
+            // No sim state exists yet - a real fighter state machine will be the first real
+            // tick consumer of playerInputHistory.
+        }
 
         // rootTransform/meshWorldTransform are both Identity here, not characterRootTransform -
         // see Engine::ComputeSkinningMatrices's own comment for why this asset's skin data
@@ -170,6 +191,24 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
             {
                 rebuildDrawItems();
             }
+
+            // Visualizes the fixed-tick loop and the InputCommand it produces, since nothing
+            // else consumes either yet. One line per concern to stay compact in this
+            // already-tall debug window. Names here are Game's own (Engine's InputCommand has
+            // no idea these slots mean "Jump"/"Punch"/etc. - see Engine/Input.h).
+            static const char* kButtonNames[] = { "Jump", "Crouch", "Punch", "Kick", "Block" };
+            ImGui::SeparatorText("Input");
+            ImGui::Text("Tick: %u  Axis: %.2f", simClock.tickCount, lastInputCommand.axis);
+            char buttonSummary[128] = {};
+            size_t offset = 0;
+            for (size_t i = 0; i < static_cast<size_t>(Game::FighterButton::Count); ++i)
+            {
+                const Engine::ButtonState& button = lastInputCommand.buttons[i];
+                offset += static_cast<size_t>(snprintf(
+                    buttonSummary + offset, sizeof(buttonSummary) - offset, "%s%s=%s%s%s", i == 0 ? "" : " ", kButtonNames[i],
+                    button.held ? "held" : "-", button.pressedThisTick ? "(P)" : "", button.releasedThisTick ? "(R)" : ""));
+            }
+            ImGui::Text("%s", buttonSummary);
         };
 
         if (Renderer::RenderTasks::DoFrame(viewProjection, primaryContentUI, debugSectionUI))

@@ -1,14 +1,11 @@
 #include "Camera.h"
 
+#include "Foundation/Input.h"
+
 #include <cmath>
 
 namespace
 {
-    bool KeyDown(int virtualKey)
-    {
-        return (GetAsyncKeyState(virtualKey) & 0x8000) != 0;
-    }
-
     DirectX::XMVECTOR ComputeForward(float yaw, float pitch)
     {
         return DirectX::XMVectorSet(sinf(yaw) * cosf(pitch), sinf(pitch), cosf(yaw) * cosf(pitch), 0.0f);
@@ -27,21 +24,33 @@ namespace Engine
         constexpr float moveUnitsPerSecond = 3.0f;
         constexpr float turnRadiansPerSecond = 1.5f;
 
-        if (KeyDown(VK_LEFT))
+        if (Foundation::IsKeyDown(VK_LEFT))
         {
             camera.yaw -= turnRadiansPerSecond * deltaSeconds;
         }
-        if (KeyDown(VK_RIGHT))
+        if (Foundation::IsKeyDown(VK_RIGHT))
         {
             camera.yaw += turnRadiansPerSecond * deltaSeconds;
         }
-        if (KeyDown(VK_UP))
+        if (Foundation::IsKeyDown(VK_UP))
         {
             camera.pitch += turnRadiansPerSecond * deltaSeconds;
         }
-        if (KeyDown(VK_DOWN))
+        if (Foundation::IsKeyDown(VK_DOWN))
         {
             camera.pitch -= turnRadiansPerSecond * deltaSeconds;
+        }
+
+        // Gamepad slot 0 mimics the keyboard/mouse axes above (right stick = look, left stick =
+        // move further down) - read directly from Foundation::Input, not Engine::InputCommand,
+        // for the same reason the keyboard/mouse polling above is: this is debug camera
+        // tooling, not gameplay input, and InputCommand is deliberately shaped for the latter
+        // only (see Input.h).
+        const Foundation::GamepadState gamepad = Foundation::GetGamepadState(0);
+        if (gamepad.connected)
+        {
+            camera.yaw += gamepad.rightStickX * turnRadiansPerSecond * deltaSeconds;
+            camera.pitch += gamepad.rightStickY * turnRadiansPerSecond * deltaSeconds;
         }
         // Clamped just short of straight up/down - forward and world-up become parallel there,
         // which degenerates XMMatrixLookToLH's internally-derived basis.
@@ -54,29 +63,35 @@ namespace Engine
 
         const float moveStep = moveUnitsPerSecond * deltaSeconds;
         DirectX::XMVECTOR eye = DirectX::XMLoadFloat3(&camera.position);
-        if (KeyDown('W'))
+        if (Foundation::IsKeyDown('W'))
         {
             eye = DirectX::XMVectorAdd(eye, DirectX::XMVectorScale(forward, moveStep));
         }
-        if (KeyDown('S'))
+        if (Foundation::IsKeyDown('S'))
         {
             eye = DirectX::XMVectorSubtract(eye, DirectX::XMVectorScale(forward, moveStep));
         }
-        if (KeyDown('D'))
+        if (Foundation::IsKeyDown('D'))
         {
             eye = DirectX::XMVectorAdd(eye, DirectX::XMVectorScale(right, moveStep));
         }
-        if (KeyDown('A'))
+        if (Foundation::IsKeyDown('A'))
         {
             eye = DirectX::XMVectorSubtract(eye, DirectX::XMVectorScale(right, moveStep));
         }
-        if (KeyDown('Q'))
+        if (Foundation::IsKeyDown('Q'))
         {
             eye = DirectX::XMVectorAdd(eye, DirectX::XMVectorScale(up, moveStep));
         }
-        if (KeyDown('E'))
+        if (Foundation::IsKeyDown('E'))
         {
             eye = DirectX::XMVectorSubtract(eye, DirectX::XMVectorScale(up, moveStep));
+        }
+        // Left stick mimics W/S (forward axis) and A/D (strafe axis).
+        if (gamepad.connected)
+        {
+            eye = DirectX::XMVectorAdd(eye, DirectX::XMVectorScale(forward, gamepad.leftStickY * moveStep));
+            eye = DirectX::XMVectorAdd(eye, DirectX::XMVectorScale(right, gamepad.leftStickX * moveStep));
         }
         DirectX::XMStoreFloat3(&camera.position, eye);
 
@@ -85,14 +100,14 @@ namespace Engine
         // static rather than fields on Camera itself, since they're input-tracking state, not
         // camera state - fine as long as only one camera ever calls this, which is the only
         // case that exists today.
-        static POINT lastCursor = { 0, 0 };
+        static long lastCursorX = 0;
+        static long lastCursorY = 0;
         static bool wasDragging = false;
 
-        POINT cursor;
-        GetCursorPos(&cursor);
-        const bool leftDown = KeyDown(VK_LBUTTON);
-        const bool rightDown = KeyDown(VK_RBUTTON);
-        const bool middleDown = KeyDown(VK_MBUTTON);
+        const Foundation::MouseState mouse = Foundation::GetMouseState();
+        const bool leftDown = mouse.leftDown;
+        const bool rightDown = mouse.rightDown;
+        const bool middleDown = mouse.middleDown;
         const bool dragging = leftDown || rightDown || middleDown;
 
         // Only apply a delta once a full frame has already seen the button held - the first
@@ -100,8 +115,8 @@ namespace Engine
         // the camera by however far the cursor happened to be from wherever it last was.
         if (dragging && wasDragging)
         {
-            const float deltaX = static_cast<float>(cursor.x - lastCursor.x);
-            const float deltaY = static_cast<float>(cursor.y - lastCursor.y);
+            const float deltaX = static_cast<float>(mouse.x - lastCursorX);
+            const float deltaY = static_cast<float>(mouse.y - lastCursorY);
 
             constexpr float mouseTurnRadiansPerPixel = 0.005f;
             constexpr float mousePanUnitsPerPixel = 0.01f;
@@ -147,7 +162,8 @@ namespace Engine
             }
         }
 
-        lastCursor = cursor;
+        lastCursorX = mouse.x;
+        lastCursorY = mouse.y;
         wasDragging = dragging;
     }
 

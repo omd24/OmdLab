@@ -43,6 +43,10 @@ namespace Engine
     // arrives via WM_MOUSEWHEEL window messages requiring true keyboard focus (confirmed via
     // logging that it doesn't reliably reach this app, unlike focus-independent button-state
     // polling). Deliberately the simple mapping, not a from-scratch camera rig.
+    //
+    // Also supports a gamepad (XInput slot 0): left stick mimics W/S/A/D, right stick mimics
+    // the arrow keys. Read directly via Foundation::Input, not Engine::InputCommand - this is
+    // debug camera tooling, not gameplay input (see Engine/Input.h for why those stay separate).
     void UpdateFreeFlyCamera(Camera& camera, HWND window, float deltaSeconds);
 
     // Combined view * projection matrix, transposed for the row_major cbuffer convention every

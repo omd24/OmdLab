@@ -83,6 +83,13 @@ public abstract class OmdLabProjectBase : Project
 public class Foundation : OmdLabProjectBase
 {
     public Foundation() : base("Foundation") { }
+
+    public override void ConfigureAll(Configuration conf, Target target)
+    {
+        base.ConfigureAll(conf, target);
+        // XInput gamepad polling (Foundation/Input.cpp).
+        conf.LibraryFiles.Add("Xinput.lib");
+    }
 }
 
 [Sharpmake.Generate]
