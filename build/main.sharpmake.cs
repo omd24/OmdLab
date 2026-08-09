@@ -76,6 +76,15 @@ public abstract class OmdLabProjectBase : Project
         // Graphics backend selection - see Renderer/PlatformMacros.h.
         // Global so every project's headers agree on which backend is active.
         conf.Defines.Add("OMD_GFX_DX12");
+
+        // Gates developer-only tooling (ImGui and everything built on it: the "Renderer Debug"
+        // window, DebugDrawPass, LocalTestScene, Game's own debug UI/collision test rig) -
+        // orthogonal to OMD_DEBUG/OMD_RELEASE on purpose, since those are about optimization
+        // level/CRT, not feature availability (an optimized Release build that still wants dev
+        // tools for perf-testing must stay possible). Unconditional for both configs today,
+        // since no third "Shipping" config exists yet - the point is having one flag already
+        // wired to flip off later, not a shipping pipeline now.
+        conf.Defines.Add("OMD_DEV_TOOLS");
     }
 }
 

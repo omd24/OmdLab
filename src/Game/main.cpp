@@ -110,13 +110,16 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
         }
     }
     registry.emplace<Engine::ClipPlayback>(characterEntity);
+#ifdef OMD_DEV_TOOLS
     // Debug-UI clip combo contents - built once since Asset::Clip::name (and characterModel
-    // itself) don't change after import.
+    // itself) don't change after import. Only ever read by primaryContentUI below, so gated
+    // alongside it rather than built and left unused.
     std::vector<const char*> characterClipNames;
     for (const Asset::Clip& clip : characterModel.clips)
     {
         characterClipNames.push_back(clip.name.c_str());
     }
+#endif
     // Default to "idle" by name, not clip index 0 - the export pipeline's clip order isn't
     // something this code controls (observed to land alphabetically), so relying on index 0
     // to mean anything in particular would be a silent, easy-to-break assumption now that the
@@ -137,11 +140,14 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     registry.emplace<Engine::Hurtbox>(
         characterEntity, Engine::Hurtbox{ { Engine::CollisionBox{ { 0.0f, 0.9f, 0.0f }, { 0.35f, 0.9f, 0.25f } } } });
 
+#ifdef OMD_DEV_TOOLS
     // Collision module test rig (no real per-move hitbox/state data exists yet - that arrives
     // with the content and state-machine steps) - hand-placed volumes purely to prove
     // Engine::ResolveCollisions/BuildCollisionDebugLines end to end. Positioned off to either
     // side by default (no overlap with the character's hurtbox at rest); dragged via the
-    // "Debug" section's sliders below to make hit/trigger events fire live.
+    // "Debug" section's sliders below to make hit/trigger events fire live. Dev-only by
+    // construction (there's no non-debug reason for these entities to exist), so gated entirely
+    // rather than just hidden from a UI that also wouldn't exist.
     const entt::entity testHitboxEntity = registry.create();
     registry.emplace<Engine::Transform>(testHitboxEntity, Engine::Transform{ { 2.0f, 0.9f, 0.0f } });
     registry.emplace<Engine::Hitbox>(testHitboxEntity, Engine::Hitbox{ Engine::CollisionBox{ {}, { 0.2f, 0.2f, 0.2f } }, /*moveId*/ 1 });
@@ -150,10 +156,17 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     registry.emplace<Engine::Transform>(testTriggerEntity, Engine::Transform{ { -2.0f, 0.9f, 0.0f } });
     registry.emplace<Engine::TriggerVolume>(
         testTriggerEntity, Engine::TriggerVolume{ Engine::CollisionBox{ {}, { 0.5f, 1.0f, 0.5f } }, /*triggerId*/ 1 });
+#endif
 
+#ifdef OMD_DEV_TOOLS
     // Dev-only stress-test content (see the "Bulk external test content" working convention) -
-    // empty (and a no-op) when local/ isn't present.
+    // empty (and a no-op) when local/ isn't present. No non-dev-tools reason for this content
+    // to ever exist, so its loading is gated entirely, not just its debug checkbox.
     std::vector<Renderer::StaticMeshDrawItem> localTestSceneDrawItems = LocalTestScene::LoadIfAvailable();
+    // Off by default - dev-only content (see the "Bulk external test content" working
+    // convention), not something the default view should depend on.
+    bool enableLocalTestScene = false;
+#endif
 
     // The character (GPU-skinned) and local test scene (rigid) are different draw item types
     // feeding different passes - StaticMeshPass/SkinnedMeshPass never learn a "character" or
@@ -162,13 +175,14 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     // re-applied whenever the debug checkboxes below change - cheap, since the underlying GPU
     // buffers/textures were already uploaded once above and this only rebuilds the item lists.
     bool enableCharacter = true;
-    // Off by default - dev-only content (see the "Bulk external test content" working
-    // convention), not something the default view should depend on.
-    bool enableLocalTestScene = false;
     auto rebuildDrawItems = [&]()
     {
         Renderer::SkinnedMeshPass::SetDrawItems(enableCharacter ? characterDrawItems : std::vector<Renderer::SkinnedMeshDrawItem>{});
+#ifdef OMD_DEV_TOOLS
         Renderer::StaticMeshPass::SetDrawItems(enableLocalTestScene ? localTestSceneDrawItems : std::vector<Renderer::StaticMeshDrawItem>{});
+#else
+        Renderer::StaticMeshPass::SetDrawItems({});
+#endif
     };
     rebuildDrawItems();
 
@@ -226,18 +240,22 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
                 DirectX::XMMatrixIdentity(), *registry.get<Engine::SkinnedRenderable>(characterEntity).drawItem);
         }
 
+#ifdef OMD_DEV_TOOLS
         // Rebuilt every render frame from the latest resolved tick's events (see above) - cheap
-        // at this entity count, and DebugDrawPass::SetLines is a no-op-shaped call to make
-        // regardless of whether the pass is actually toggled on (same "empty list draws nothing"
-        // reasoning as StaticMeshPass/SkinnedMeshPass).
+        // at this entity count. Purely feeds DebugDrawPass's visualization (itself dev-tools-
+        // gated), so gated together rather than built and silently never rendered.
         Renderer::DebugDrawPass::SetLines(Engine::BuildCollisionDebugLines(registry, lastCollisionEvents));
+#endif
 
+#ifdef OMD_DEV_TOOLS
         // Character is real, shipped content - shown above RenderTasks' own "Debug" section,
         // not inside it. Local test scene is dev-only content (see the "Bulk external test
         // content" working convention), grouped with RenderTasks' own bring-up toggles
         // instead - both land in the one "Renderer Debug" window regardless, since Renderer
         // just invokes whichever of these two callbacks was given at whichever point in that
-        // window it doesn't itself know or care what they contain.
+        // window it doesn't itself know or care what they contain. Both lambdas (and the
+        // DoFrame call passing them) only exist under OMD_DEV_TOOLS - there's no non-ImGui UI
+        // system yet, so this whole window is dev tooling, not just its individual toggles.
         auto primaryContentUI = [&]()
         {
             if (ImGui::Checkbox("Character", &enableCharacter))
@@ -300,6 +318,9 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
             registry.get<Engine::Transform>(testTriggerEntity).position.x = -2.0f;
             rebuildDrawItems();
         }
+#else
+        Renderer::RenderTasks::DoFrame(viewProjection);
+#endif
     }
 
     Renderer::RenderTasks::Shutdown();

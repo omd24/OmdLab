@@ -51,14 +51,21 @@ namespace Renderer
             ForwardPass::Init();
             StaticMeshPass::Init();
             SkinnedMeshPass::Init();
+#ifdef OMD_DEV_TOOLS
+            // DebugDrawPass and ImGui are dev-only tooling (see build/main.sharpmake.cs's
+            // OMD_DEV_TOOLS comment) - gated together since DebugDrawPass is only ever toggled
+            // through the ImGui window below, and ImGui itself has nothing to draw without it.
             DebugDrawPass::Init();
             ImGuiHelper::Init(window);
+#endif
         }
 
         static void Shutdown()
         {
+#ifdef OMD_DEV_TOOLS
             ImGuiHelper::Shutdown();
             DebugDrawPass::Shutdown();
+#endif
             SkinnedMeshPass::Shutdown();
             StaticMeshPass::Shutdown();
             ForwardPass::Shutdown();
@@ -96,10 +103,14 @@ namespace Renderer
         // content-category toggles). RenderTasks deliberately doesn't know what any of that
         // caller-owned state is - a bool signal is enough to keep that decoupled, rather than
         // a settings/config type shared across the Renderer/Game boundary.
+        // primaryContentUI/debugSectionUI are only ever invoked under OMD_DEV_TOOLS (see below) -
+        // still accepted unconditionally so Game/main.cpp doesn't need its own #ifdef around
+        // this call, just around constructing the lambdas it passes in.
         static bool DoFrame(
             const DirectX::XMFLOAT4X4& viewProjection, const std::function<void()>& primaryContentUI = {},
             const std::function<void()>& debugSectionUI = {})
         {
+#ifdef OMD_DEV_TOOLS
             ImGuiHelper::NewFrame();
 
             // Off by default - this is bring-up-only debug UI (a window rendering alone
@@ -148,14 +159,17 @@ namespace Renderer
                 Foundation::Log::Write(Foundation::Log::Severity::Info, "Renderer", "Reset to defaults");
             }
             ImGui::End();
+#endif
 
             Device::BeginFrame();
+#ifdef OMD_DEV_TOOLS
             if (enableBackgroundPass)
             {
                 BackgroundPass::Render({});
                 Device::CompositeComputeTarget();
             }
             else
+#endif
             {
                 // Skipping the compute dispatch but still calling
                 // CompositeComputeTarget() would copy in whatever the
@@ -163,10 +177,12 @@ namespace Renderer
                 // actually absent - clear the back buffer directly instead.
                 Device::ClearAndBindRenderTarget();
             }
+#ifdef OMD_DEV_TOOLS
             if (enableForwardPass)
             {
                 ForwardPass::Render({ viewProjection });
             }
+#endif
             // No master on/off switch for this one - it's data-driven (see
             // StaticMeshPass::SetDrawItems), and an empty draw item list already draws
             // nothing on its own. A separate switch on top of that would just be a second,
@@ -174,14 +190,20 @@ namespace Renderer
             // selection (see extraDebugUI above) already controls.
             StaticMeshPass::Render({ viewProjection });
             SkinnedMeshPass::Render({ viewProjection });
+#ifdef OMD_DEV_TOOLS
             if (enableDebugDrawPass)
             {
                 DebugDrawPass::Render({ viewProjection });
             }
             ImGuiHelper::Render();
+#endif
             Device::EndFrame();
 
+#ifdef OMD_DEV_TOOLS
             return resetRequested;
+#else
+            return false;
+#endif
         }
     };
 }
