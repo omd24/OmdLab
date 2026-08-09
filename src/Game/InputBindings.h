@@ -2,6 +2,9 @@
 
 #include "Engine/Input.h"
 
+#include <optional>
+#include <string>
+
 namespace Game
 {
     // The buttons a fighter reads. A stand-in gameplay set, not yet validated against any real
@@ -15,6 +18,7 @@ namespace Game
         Punch,
         Kick,
         Block,
+        Run,
         Count
     };
 
@@ -23,4 +27,9 @@ namespace Game
     // for a data file later (per the "input bindings should be tabular" design) changes only
     // this function's implementation, not any caller.
     Engine::InputBindings MakeDefaultFighterBindings();
+
+    // Maps a move's authored inputButton field (a bare identifier in .combat content, e.g.
+    // "Punch") onto this enum - std::nullopt for an unrecognized name, so a typo'd field fails
+    // to match any input rather than crashing or aliasing to button 0.
+    std::optional<FighterButton> ParseFighterButtonName(const std::string& name);
 }

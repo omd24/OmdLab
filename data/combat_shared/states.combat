@@ -1,0 +1,133 @@
+# Shared fighter state topology - one file for the whole (symmetric) roster, per-character
+# variation lives entirely in each character's own moves file instead of a copy of this graph.
+#
+# Reactive transitions (HitStun/KO) are listed before progression ones (Walk/Run/Attack) in every
+# state body - transitions are evaluated in file order, first true one wins, so getting hit or
+# dying always pre-empts everything else that tick.
+#
+# HitStun deliberately has no "wasHit" transition - a move's hitbox can stay active for several
+# ticks, and the generic executor only ever re-evaluates the CURRENT state's own transitions, so
+# leaving it out here is what stops a single hit from re-triggering HitStun on every tick it's
+# still overlapping.
+#
+# KO has no transitions out - no round-reset flow exists yet.
+
+state Idle
+{
+    transition HitStun
+    {
+        require wasHit
+    }
+
+    transition KO
+    {
+        require healthDepleted
+    }
+
+    transition Attack
+    {
+        require moveSelected
+    }
+
+    transition Run
+    {
+        require runHeld
+    }
+
+    transition Walk
+    {
+        require moveAxisNonZero
+    }
+}
+
+state Walk
+{
+    transition HitStun
+    {
+        require wasHit
+    }
+
+    transition KO
+    {
+        require healthDepleted
+    }
+
+    transition Attack
+    {
+        require moveSelected
+    }
+
+    transition Run
+    {
+        require runHeld
+    }
+
+    transition Idle
+    {
+        require not moveAxisNonZero
+    }
+}
+
+state Run
+{
+    transition HitStun
+    {
+        require wasHit
+    }
+
+    transition KO
+    {
+        require healthDepleted
+    }
+
+    transition Attack
+    {
+        require moveSelected
+    }
+
+    transition Walk
+    {
+        not runHeld
+        moveAxisNonZero
+    }
+
+    transition Idle
+    {
+        require not runHeld
+    }
+}
+
+state Attack
+{
+    transition HitStun
+    {
+        require wasHit
+    }
+
+    transition KO
+    {
+        require healthDepleted
+    }
+
+    transition Idle
+    {
+        require animationFinished
+    }
+}
+
+state HitStun
+{
+    transition KO
+    {
+        require healthDepleted
+    }
+
+    transition Idle
+    {
+        require animationFinished
+    }
+}
+
+state KO
+{
+}

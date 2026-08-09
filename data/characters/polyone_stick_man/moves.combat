@@ -1,0 +1,61 @@
+# This character's moveset - per-character content, cross-referenced from the shared state
+# topology only through generic flags (moveSelected, hitConfirmed, ...), never by name.
+#
+# startup+active+recovery must sum to (roughly) the real animationClip's own duration in frames
+# at 60Hz, or the state machine returns to Idle - cutting the visible clip short - well before it
+# actually finishes playing. Real clip durations (from the asset import log): punch = 0.667s = 40
+# frames, kick_light = 1.300s = 78 frames. First real tuning pass, still easy to retune further
+# once real play makes clear whether punch/kick feel right relative to each other - just keep the
+# three frame counts summing to the clip's own length.
+
+move punch
+{
+    animationClip "punch"
+    inputButton Punch
+    startup 8
+    active 8
+    recovery 24
+    damage 8
+    onHitStun 14
+    onBlockStun 8
+    guardHeight mid
+
+    hitbox
+    {
+        offsetX 0.3
+        offsetY 0.9
+        offsetZ 0
+        halfX 0.25
+        halfY 0.2
+        halfZ 0.2
+    }
+
+    cancel kick_light
+    {
+        require hitConfirmed
+        require frame >= 10
+    }
+}
+
+move kick_light
+{
+    animationClip "kick_light"
+    inputButton Kick
+    startup 15
+    active 10
+    recovery 53
+    damage 10
+    onHitStun 16
+    onBlockStun 10
+    guardHeight mid
+
+    hitbox
+    {
+        offsetX 0.4
+        offsetY 0.5
+        offsetZ 0
+        halfX 0.3
+        halfY 0.25
+        halfZ 0.25
+    }
+}

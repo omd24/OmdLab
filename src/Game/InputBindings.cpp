@@ -29,10 +29,25 @@ namespace Game
         block.primaryKey = VK_LSHIFT;
         block.gamepadInput = Engine::GamepadInput::RightShoulder;
 
+        auto& run = bindings.buttons[static_cast<size_t>(FighterButton::Run)];
+        run.primaryKey = 'L';
+        run.gamepadInput = Engine::GamepadInput::LeftShoulder;
+
         bindings.axis.negativeKey = 'A';
         bindings.axis.positiveKey = 'D';
         bindings.axis.gamepadAxis = Engine::GamepadAxis::LeftStickX;
 
         return bindings;
+    }
+
+    std::optional<FighterButton> ParseFighterButtonName(const std::string& name)
+    {
+        if (name == "Jump") return FighterButton::Jump;
+        if (name == "Crouch") return FighterButton::Crouch;
+        if (name == "Punch") return FighterButton::Punch;
+        if (name == "Kick") return FighterButton::Kick;
+        if (name == "Block") return FighterButton::Block;
+        if (name == "Run") return FighterButton::Run;
+        return std::nullopt;
     }
 }

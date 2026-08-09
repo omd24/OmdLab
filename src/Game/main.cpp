@@ -13,8 +13,11 @@
 #include "Foundation/Window.h"
 #include "Renderer/DebugDrawPass.h"
 #include "Renderer/RenderTasks.h"
+#include "CombatDsl.h"
+#include "FighterState.h"
 #include "InputBindings.h"
 #include "LocalTestScene.h"
+#include "MoveTable.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
@@ -48,6 +51,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
 
     OMD_DEBUG_PRINT("Debug print smoke test, value = %d", 42);
     OMD_ASSERT(1 + 1 == 2, "Sanity check failed: math is broken");
+    Game::CombatDsl::RunSelfTest();
 
     constexpr unsigned int windowWidth = 1280;
     constexpr unsigned int windowHeight = 720;
@@ -60,6 +64,49 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     }
 
     Renderer::RenderTasks::Init(window, windowWidth, windowHeight);
+
+    // Shared fighter state topology (one file, whole roster) - loaded once, referenced by every
+    // fighter entity's per-tick state-machine evaluation (not wired to gameplay until a later
+    // step in this same pass). Asserting its expected shape here, at load time, since this file
+    // and the state-name-specific meaning elsewhere are two independently-editable places that
+    // must agree - a typo in either should fail loudly at startup, not silently misbehave later.
+    Game::CombatDsl::CombatFile sharedStates;
+    const bool sharedStatesLoaded = Game::CombatDsl::LoadCombatFile("data/combat_shared/states.combat", sharedStates);
+    OMD_ASSERT(sharedStatesLoaded, "Failed to load data/combat_shared/states.combat");
+    OMD_ASSERT(sharedStates.states.size() == 6, "Expected 6 states in states.combat, got %zu", sharedStates.states.size());
+    for (const char* expectedState : { "Idle", "Walk", "Run", "Attack", "HitStun", "KO" })
+    {
+        bool found = false;
+        for (const Game::CombatDsl::StateDecl& state : sharedStates.states)
+        {
+            if (state.name == expectedState)
+            {
+                found = true;
+                break;
+            }
+        }
+        OMD_ASSERT(found, "states.combat is missing expected state '%s'", expectedState);
+    }
+
+    // This character's own moveset. modelDirectory duplicates the (still-hardcoded for now)
+    // kCharacterDirectory constant below - collapsed into one source of truth once
+    // CharacterDefinition actually drives character loading later in this same pass.
+    Game::CharacterDefinition characterDefinition;
+    characterDefinition.modelDirectory = "data/characters/polyone_stick_man";
+    {
+        Game::CombatDsl::CombatFile movesFile;
+        const bool movesLoaded = Game::CombatDsl::LoadCombatFile("data/characters/polyone_stick_man/moves.combat", movesFile);
+        OMD_ASSERT(movesLoaded, "Failed to load moves.combat");
+        const bool built = Game::BuildMoveTable(std::move(movesFile), characterDefinition.moveTable);
+        OMD_ASSERT(built, "Failed to build MoveTable from moves.combat");
+    }
+    for (const Game::MoveDefinition& move : characterDefinition.moveTable.moves)
+    {
+        Foundation::Log::Write(
+            Foundation::Log::Severity::Info, "Game", "Loaded move '%s': clip=%s damage=%d startup=%u active=%u recovery=%u cancels=%zu",
+            move.id.c_str(), move.animationClip.c_str(), move.damage, move.startupFrames, move.activeFrames, move.recoveryFrames,
+            move.cancels.size());
+    }
 
     // The one entity in the scene so far. FighterState/Health/input-association aren't
     // components yet - they wait for a state machine to actually need them.
@@ -140,6 +187,11 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     registry.emplace<Engine::Hurtbox>(
         characterEntity, Engine::Hurtbox{ { Engine::CollisionBox{ { 0.0f, 0.9f, 0.0f }, { 0.35f, 0.9f, 0.25f } } } });
 
+    registry.emplace<Game::FighterState>(characterEntity);
+    registry.emplace<Game::Health>(
+        characterEntity, Game::Health{ characterDefinition.stats.maxHealth, characterDefinition.stats.maxHealth });
+    registry.emplace<Game::MoveSource>(characterEntity, Game::MoveSource{ &characterDefinition.moveTable });
+
 #ifdef OMD_DEV_TOOLS
     // Collision module test rig (no real per-move hitbox/state data exists yet - that arrives
     // with the content and state-machine steps) - hand-placed volumes purely to prove
@@ -150,7 +202,22 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     // rather than just hidden from a UI that also wouldn't exist.
     const entt::entity testHitboxEntity = registry.create();
     registry.emplace<Engine::Transform>(testHitboxEntity, Engine::Transform{ { 2.0f, 0.9f, 0.0f } });
-    registry.emplace<Engine::Hitbox>(testHitboxEntity, Engine::Hitbox{ Engine::CollisionBox{ {}, { 0.2f, 0.2f, 0.2f } }, /*moveId*/ 1 });
+
+    // A tiny throwaway MoveTable so this dev-only "attacker" drives the same real hit-resolution
+    // path (damage/hitstun/block via MoveSource - see FighterState.h) a real fighter's hitbox
+    // would, instead of a bespoke test-only code path in FighterState.cpp. Declared here (not a
+    // temporary) so its address stays valid for MoveSource's raw pointer to reference for the
+    // rest of the program, same lifetime pattern as characterDefinition above.
+    Game::MoveTable devTestMoveTable;
+    devTestMoveTable.moves.push_back(Game::MoveDefinition{});
+    devTestMoveTable.moves[0].id = "dev_test_hit";
+    devTestMoveTable.moves[0].damage = 15;
+    devTestMoveTable.moves[0].onHitStunFrames = 20;
+    devTestMoveTable.moves[0].onBlockStunFrames = 10;
+    registry.emplace<Game::MoveSource>(testHitboxEntity, Game::MoveSource{ &devTestMoveTable });
+    registry.emplace<Engine::Hitbox>(
+        testHitboxEntity,
+        Engine::Hitbox{ Engine::CollisionBox{ {}, { 0.2f, 0.2f, 0.2f } }, static_cast<uint32_t>(devTestMoveTable.IndexOf("dev_test_hit")) });
 
     const entt::entity testTriggerEntity = registry.create();
     registry.emplace<Engine::Transform>(testTriggerEntity, Engine::Transform{ { -2.0f, 0.9f, 0.0f } });
@@ -206,6 +273,14 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     // Latest tick's collision resolution - read by the debug draw list below between ticks, the
     // same "store the final answer" shape lastInputCommand already uses.
     Engine::CollisionEvents lastCollisionEvents;
+    // SelectMove()'s result this tick - debug readout only for now (Phase 3 of the state-machine
+    // work), not yet load-bearing; a later phase feeds this into the Attack-state transition.
+    std::optional<std::string> lastSelectedMove;
+    // When true, the "Clip" dropdown below drives the character's ClipPlayback directly (the
+    // pre-state-machine behavior, wall-clock Advance()'d, for eyeballing one clip in isolation)
+    // and UpdateFighterState is skipped entirely for this entity so it can't fight back over the
+    // manual selection. Off by default - real gameplay is game-driven, this is a testing aid.
+    bool manualClipOverride = false;
     const Engine::InputBindings fighterBindings = Game::MakeDefaultFighterBindings();
     auto lastFrameTime = std::chrono::steady_clock::now();
 
@@ -233,8 +308,38 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
         {
             lastInputCommand = Engine::AssembleInputCommand(simClock.tickCount, fighterBindings, lastInputCommand, /*gamepadIndex*/ 0);
             playerInputHistory.Push(lastInputCommand);
-            // No sim state exists yet - a real fighter state machine will be the first real
-            // tick consumer of playerInputHistory.
+
+            // Debug readout only for now (Phase 3) - only overwritten on an actual selection
+            // (not cleared back to empty every tick that isn't one) so it shows "the last real
+            // selection" long enough to see, rather than a value only ever true for one ~16ms
+            // tick. UpdateFighterState below calls SelectMove again itself once move selection
+            // actually becomes load-bearing (a later phase of this step) - harmless duplicate
+            // work at this entity count, not worth threading the result through as a parameter.
+            if (const std::optional<std::string> selected = Game::SelectMove(characterDefinition, playerInputHistory); selected.has_value())
+            {
+                lastSelectedMove = selected;
+            }
+
+            // Reacts to LAST tick's collision events (still held in lastCollisionEvents from the
+            // previous iteration at this point) and decides this tick's Transform/ClipPlayback
+            // (and, from a later phase of this step, Hitbox attach/detach) - must run before
+            // ResolveCollisions below so this tick's freshly-updated boxes are what gets tested,
+            // not stale ones. A hit is therefore detected and applied one tick after a hitbox
+            // actually became active - imperceptible at 60Hz, the same kind of deliberate lag the
+            // debug-slider-to-collision-color path already has.
+            // Skipped entirely while manualClipOverride is on (see the Clip dropdown below) so
+            // the state machine can't fight the manual clip selection - it would otherwise
+            // overwrite ClipPlayback right back to whatever Idle/Walk/etc. currently means every
+            // tick, which is exactly the "dropdown doesn't do anything" symptom this override
+            // exists to fix.
+            if (!manualClipOverride)
+            {
+                Game::UpdateFighterState(
+                    registry, characterEntity,
+                    Game::FighterUpdateInput{
+                        lastInputCommand, playerInputHistory, lastCollisionEvents, sharedStates, characterDefinition,
+                        characterModel.clips });
+            }
 
             // Deterministic, fixed-tick per the networking-readiness design - resolved here, not
             // once per render frame, even though nothing yet moves entities per tick (the debug
@@ -248,11 +353,25 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
         // see Engine::ComputeSkinningMatrices's own comment for why this asset's skin data
         // specifically needs that. Runs every frame regardless of ClipPlayback::playing so a
         // paused clip still renders its current (frozen) pose rather than disappearing.
+        //
+        // No Advance() call here anymore - UpdateFighterState (in the tick loop above) now owns
+        // this entity's playbackTimeSeconds directly, setting it from frame counts each tick so
+        // the visible animation and frame-exact combat data (hit windows, cancel timing) share
+        // one clock instead of drifting apart. This does mean the character's pose is now
+        // 60Hz-stepped rather than smoothly wall-clock-interpolated - a deliberate consequence of
+        // "gameplay-affecting logic runs once per tick," not a bug.
         if (characterSkin != nullptr && !characterModel.clips.empty() && registry.all_of<Engine::SkinnedRenderable>(characterEntity))
         {
             Engine::ClipPlayback& characterPlayback = registry.get<Engine::ClipPlayback>(characterEntity);
             const Asset::Clip& clip = characterModel.clips[characterPlayback.clipIndex];
-            characterPlayback.Advance(deltaSeconds, clip.durationSeconds);
+            // Manual override restores the pre-state-machine behavior for this entity only:
+            // wall-clock Advance(), same as every other clip preview in this app - lets one clip
+            // be eyeballed in isolation without the state machine (skipped above) setting
+            // playbackTimeSeconds itself.
+            if (manualClipOverride)
+            {
+                characterPlayback.Advance(deltaSeconds, clip.durationSeconds);
+            }
             Engine::UpdateSkinnedPose(
                 characterModel, *characterSkin, clip, characterPlayback.playbackTimeSeconds, DirectX::XMMatrixIdentity(),
                 DirectX::XMMatrixIdentity(), *registry.get<Engine::SkinnedRenderable>(characterEntity).drawItem);
@@ -282,14 +401,21 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
             }
             if (!characterClipNames.empty())
             {
+                // Off by default: UpdateFighterState (Idle/Walk/Run/Attack/.../KO) owns this
+                // entity's clip during real play and would otherwise overwrite any manual pick
+                // made below on the very next tick. Flip this on to preview one clip in
+                // isolation, same workflow as before the state machine existed.
+                ImGui::Checkbox("Manual clip override", &manualClipOverride);
                 Engine::ClipPlayback& characterPlayback = registry.get<Engine::ClipPlayback>(characterEntity);
                 int clipIndex = characterPlayback.clipIndex;
+                ImGui::BeginDisabled(!manualClipOverride);
                 if (ImGui::Combo("Clip", &clipIndex, characterClipNames.data(), static_cast<int>(characterClipNames.size())))
                 {
                     characterPlayback.clipIndex = clipIndex;
                     characterPlayback.playbackTimeSeconds = 0.0f;
                 }
                 ImGui::Checkbox("Playing", &characterPlayback.playing);
+                ImGui::EndDisabled();
             }
         };
         auto debugSectionUI = [&]()
@@ -310,7 +436,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
             // else consumes either yet. One line per concern to stay compact in this
             // already-tall debug window. Names here are Game's own (Engine's InputCommand has
             // no idea these slots mean "Jump"/"Punch"/etc. - see Engine/Input.h).
-            static const char* kButtonNames[] = { "Jump", "Crouch", "Punch", "Kick", "Block" };
+            static const char* kButtonNames[] = { "Jump", "Crouch", "Punch", "Kick", "Block", "Run" };
             ImGui::SeparatorText("Input");
             ImGui::Text("Tick: %u  Axis: %.2f", simClock.tickCount, lastInputCommand.axis);
             char buttonSummary[128] = {};
@@ -323,6 +449,21 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
                     button.held ? "held" : "-", button.pressedThisTick ? "(P)" : "", button.releasedThisTick ? "(R)" : ""));
             }
             ImGui::Text("%s", buttonSummary);
+
+            // Phase 3 of the state-machine work - proves SelectMove() in isolation before it's
+            // load-bearing for anything visible (no clip swap/state change wired up to it yet).
+            ImGui::Text("Selected move: %s", lastSelectedMove.has_value() ? lastSelectedMove->c_str() : "-");
+
+            // Fighter state machine readout - state name/frame count/health, live every tick.
+            ImGui::SeparatorText("Fighter");
+            {
+                const Game::FighterState& fighterState = registry.get<Game::FighterState>(characterEntity);
+                const Game::Health& health = registry.get<Game::Health>(characterEntity);
+                const Engine::Transform& fighterTransform = registry.get<Engine::Transform>(characterEntity);
+                ImGui::Text(
+                    "State: %s  Frame: %u  Health: %d/%d  X: %.2f", fighterState.currentState.c_str(), fighterState.framesInState,
+                    health.current, health.max, fighterTransform.position.x);
+            }
 
             // Collision module test rig - see the entity setup above for why these two entities
             // exist. Enable "Collision debug draw" above to see the boxes; drag these to make
@@ -340,8 +481,21 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
             enableCameraMouseControl = true;
             enableCharacter = true;
             enableLocalTestScene = false;
+            manualClipOverride = false;
             registry.get<Engine::Transform>(testHitboxEntity).position.x = 2.0f;
             registry.get<Engine::Transform>(testTriggerEntity).position.x = -2.0f;
+            // Also recovers the character's own fighter state/health - previously left out, which
+            // meant landing in KO (whether from real play or the test-hitbox slider above) had no
+            // UI-accessible way back to Idle short of restarting the app.
+            registry.get<Engine::Transform>(characterEntity) = Engine::Transform{};
+            registry.replace<Game::FighterState>(characterEntity, Game::FighterState{});
+            registry.replace<Game::Health>(
+                characterEntity, Game::Health{ characterDefinition.stats.maxHealth, characterDefinition.stats.maxHealth });
+            // Also drop the last-resolved hit(s) - UpdateFighterState reacts to lastCollisionEvents
+            // one tick late (see its own comment on why), so without this a hitbox that was still
+            // overlapping the instant Reset was clicked would land one more hit right after the
+            // health/state reset above, immediately re-damaging a freshly-restored fighter.
+            lastCollisionEvents = Engine::CollisionEvents{};
             rebuildDrawItems();
         }
 #else
