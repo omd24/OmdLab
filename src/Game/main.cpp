@@ -187,6 +187,15 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     rebuildDrawItems();
 
     Engine::Camera camera;
+#ifdef OMD_DEV_TOOLS
+    // The free-fly camera is itself dev-only tooling (see Engine::Camera's own header comment -
+    // no real fixed 2D game camera exists yet), so this toggle lives entirely under dev tools
+    // too. On by default, matching existing behavior. Combined with ImGui's own
+    // io.WantCaptureMouse below - the toggle covers "I want the camera locked regardless of
+    // what's under the cursor," WantCaptureMouse covers the common case (dragging a slider or
+    // clicking a checkbox) automatically, without needing to remember to flip this first.
+    bool enableCameraMouseControl = true;
+#endif
     // Fixed-timestep sim loop skeleton - no sim state exists yet to actually drive with this;
     // it proves ticks run at a fixed rate decoupled from render rate, and that a per-tick
     // InputCommand is produced and stored, ahead of a real fighter state machine becoming the
@@ -206,7 +215,16 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
         const float deltaSeconds = std::chrono::duration<float>(now - lastFrameTime).count();
         lastFrameTime = now;
 
-        Engine::UpdateFreeFlyCamera(camera, window, deltaSeconds);
+#ifdef OMD_DEV_TOOLS
+        // io.WantCaptureMouse reflects the previous frame's ImGui state (this frame's NewFrame()
+        // hasn't run yet - see RenderTasks::DoFrame) - a harmless one-frame lag, same as any
+        // other engine using this exact pattern to stop UI clicks/drags from also driving camera
+        // controls underneath the window.
+        const bool allowCameraMouse = enableCameraMouseControl && !ImGui::GetIO().WantCaptureMouse;
+#else
+        const bool allowCameraMouse = true;
+#endif
+        Engine::UpdateFreeFlyCamera(camera, window, deltaSeconds, allowCameraMouse);
         const float aspectRatio = static_cast<float>(Renderer::Device::GetWidth()) / static_cast<float>(Renderer::Device::GetHeight());
         const DirectX::XMFLOAT4X4 viewProjection = Engine::ComputeViewProjection(camera, aspectRatio);
 
@@ -281,6 +299,13 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
                 rebuildDrawItems();
             }
 
+            // See allowCameraMouse above - this is the manual half of that decision (the
+            // automatic half, io.WantCaptureMouse, needs no UI). Unrelated to the free-fly
+            // camera's future fixed-2D-view toggle (not built yet - a future "which camera is
+            // active" mode switch, not a mouse-specific concern like this one).
+            ImGui::SeparatorText("Camera");
+            ImGui::Checkbox("Camera mouse control", &enableCameraMouseControl);
+
             // Visualizes the fixed-tick loop and the InputCommand it produces, since nothing
             // else consumes either yet. One line per concern to stay compact in this
             // already-tall debug window. Names here are Game's own (Engine's InputCommand has
@@ -312,6 +337,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
         if (Renderer::RenderTasks::DoFrame(viewProjection, primaryContentUI, debugSectionUI))
         {
             camera = Engine::Camera{};
+            enableCameraMouseControl = true;
             enableCharacter = true;
             enableLocalTestScene = false;
             registry.get<Engine::Transform>(testHitboxEntity).position.x = 2.0f;

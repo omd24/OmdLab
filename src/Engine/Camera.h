@@ -47,7 +47,12 @@ namespace Engine
     // Also supports a gamepad (XInput slot 0): left stick mimics W/S/A/D, right stick mimics
     // the arrow keys. Read directly via Foundation::Input, not Engine::InputCommand - this is
     // debug camera tooling, not gameplay input (see Engine/Input.h for why those stay separate).
-    void UpdateFreeFlyCamera(Camera& camera, HWND window, float deltaSeconds);
+    //
+    // allowMouseControl: false suppresses only the mouse-drag navigation above (keyboard/gamepad
+    // still work) - lets a caller with its own mouse-driven UI (ImGui) stop clicks/drags on that
+    // UI from also dragging the camera, without losing keyboard control. Defaults true so
+    // existing callers are unaffected.
+    void UpdateFreeFlyCamera(Camera& camera, HWND window, float deltaSeconds, bool allowMouseControl = true);
 
     // Combined view * projection matrix, transposed for the row_major cbuffer convention every
     // shader in this project declares (see Triangle.hlsl/LitTextured.hlsl).

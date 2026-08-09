@@ -14,7 +14,7 @@ namespace
 
 namespace Engine
 {
-    void UpdateFreeFlyCamera(Camera& camera, HWND window, float deltaSeconds)
+    void UpdateFreeFlyCamera(Camera& camera, HWND window, float deltaSeconds, bool allowMouseControl)
     {
         if (GetForegroundWindow() != window)
         {
@@ -105,9 +105,14 @@ namespace Engine
         static bool wasDragging = false;
 
         const Foundation::MouseState mouse = Foundation::GetMouseState();
-        const bool leftDown = mouse.leftDown;
-        const bool rightDown = mouse.rightDown;
-        const bool middleDown = mouse.middleDown;
+        // Forced false rather than skipping this whole block when disallowed - lastCursorX/Y
+        // below still need to track the real cursor position every frame regardless, so that
+        // whenever mouse control resumes mid-drag, the existing "first frame of a drag has no
+        // meaningful last position" guard (dragging && wasDragging) is what naturally prevents a
+        // jump, rather than a second, separate mechanism.
+        const bool leftDown = allowMouseControl && mouse.leftDown;
+        const bool rightDown = allowMouseControl && mouse.rightDown;
+        const bool middleDown = allowMouseControl && mouse.middleDown;
         const bool dragging = leftDown || rightDown || middleDown;
 
         // Only apply a delta once a full frame has already seen the button held - the first

@@ -35,3 +35,5 @@ NOTES/
 
 # ImGui's window-layout autosave (per-machine, regenerated on first run)
 /imgui.ini
+
+src/.VSCodeCounter/
