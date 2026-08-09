@@ -2,6 +2,7 @@
 #include "Engine/Animation.h"
 #include "Engine/Camera.h"
 #include "Engine/ClipPlayback.h"
+#include "Engine/Components.h"
 #include "Engine/Engine.h"
 #include "Engine/FixedTimestep.h"
 #include "Engine/Input.h"
@@ -19,6 +20,7 @@
 #include <DirectXMath.h>
 #include <chrono>
 #include <cstdio>
+#include <entt.hpp>
 #include <imgui.h>
 #include <vector>
 
@@ -57,6 +59,12 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
 
     Renderer::RenderTasks::Init(window, windowWidth, windowHeight);
 
+    // The one entity in the scene so far. FighterState/Health/input-association aren't
+    // components yet - they wait for a state machine to actually need them.
+    entt::registry registry;
+    const entt::entity characterEntity = registry.create();
+    registry.emplace<Engine::Transform>(characterEntity);
+
     // Character asset, currently rendered in bind pose. Engine's connective resource layer
     // does the Asset-CPU-data-to-Renderer-GPU-resource translation, the same generic path the
     // local test scene below also goes through.
@@ -72,8 +80,18 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
         // something Engine's generic connective resource layer can detect or correct on its
         // own (a legitimately tiny model is indistinguishable from this from the geometry
         // alone) - a caller-known correction for this asset, per rootTransform's own contract.
-        const DirectX::XMMATRIX characterRootTransform = DirectX::XMMatrixScaling(100.0f, 100.0f, 100.0f);
+        // Composed with the entity's own Transform (applied second, so the asset-specific
+        // scale-fix always happens first regardless of where the entity is placed) - this is
+        // what makes moving Transform.position actually move the rendered character, not just
+        // add an inert component alongside the existing rendering path.
+        const DirectX::XMMATRIX characterAssetCorrection = DirectX::XMMatrixScaling(100.0f, 100.0f, 100.0f);
+        const DirectX::XMMATRIX characterRootTransform =
+            characterAssetCorrection * Engine::ComputeWorldMatrix(registry.get<Engine::Transform>(characterEntity));
         characterDrawItems = Engine::CreateSkinnedMeshDrawItems(characterModel, kCharacterDirectory, characterRootTransform);
+        if (!characterDrawItems.empty())
+        {
+            registry.emplace<Engine::SkinnedRenderable>(characterEntity, Engine::SkinnedRenderable{ &characterDrawItems[0] });
+        }
     }
 
     // Resolved once, reused every frame below - the skinned mesh node's own skin (this asset
@@ -89,7 +107,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
             break;
         }
     }
-    Engine::ClipPlayback characterPlayback;
+    registry.emplace<Engine::ClipPlayback>(characterEntity);
     // Debug-UI clip combo contents - built once since Asset::Clip::name (and characterModel
     // itself) don't change after import.
     std::vector<const char*> characterClipNames;
@@ -153,13 +171,14 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
         // see Engine::ComputeSkinningMatrices's own comment for why this asset's skin data
         // specifically needs that. Runs every frame regardless of ClipPlayback::playing so a
         // paused clip still renders its current (frozen) pose rather than disappearing.
-        if (characterSkin != nullptr && !characterModel.clips.empty() && !characterDrawItems.empty())
+        if (characterSkin != nullptr && !characterModel.clips.empty() && registry.all_of<Engine::SkinnedRenderable>(characterEntity))
         {
+            Engine::ClipPlayback& characterPlayback = registry.get<Engine::ClipPlayback>(characterEntity);
             const Asset::Clip& clip = characterModel.clips[characterPlayback.clipIndex];
             characterPlayback.Advance(deltaSeconds, clip.durationSeconds);
             Engine::UpdateSkinnedPose(
                 characterModel, *characterSkin, clip, characterPlayback.playbackTimeSeconds, DirectX::XMMatrixIdentity(),
-                DirectX::XMMatrixIdentity(), characterDrawItems[0]);
+                DirectX::XMMatrixIdentity(), *registry.get<Engine::SkinnedRenderable>(characterEntity).drawItem);
         }
 
         // Character is real, shipped content - shown above RenderTasks' own "Debug" section,
@@ -176,6 +195,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
             }
             if (!characterClipNames.empty())
             {
+                Engine::ClipPlayback& characterPlayback = registry.get<Engine::ClipPlayback>(characterEntity);
                 int clipIndex = characterPlayback.clipIndex;
                 if (ImGui::Combo("Clip", &clipIndex, characterClipNames.data(), static_cast<int>(characterClipNames.size())))
                 {

@@ -151,6 +151,9 @@ public class Engine : OmdLabProjectBase
         // texture-loading glue - Renderer's own Texture::Create takes already-decoded pixels
         // and has no use for an image-decoding library itself.
         conf.IncludePaths.Add(@"[project.SharpmakeCsPath]/../thirdParty/stb");
+
+        // EnTT, single header, fully inline/template-based - no _IMPLEMENTATION define needed, unlike cgltf/stb_image.
+        conf.IncludePaths.Add(@"[project.SharpmakeCsPath]/../thirdParty/entt");
     }
 }
 
