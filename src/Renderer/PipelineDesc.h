@@ -45,6 +45,12 @@ namespace Renderer
         // source data mixes single-sided and double-sided materials (see
         // Asset::Material::doubleSided) needs two PSOs and to pick per draw item, not this.
         bool cullBackFaces = true;
+
+        // Triangle by default - every pass so far draws triangles. DebugDrawPass is the first
+        // consumer of Line (wireframe boxes), hence this being caller-configurable at all rather
+        // than hardcoded like it was before that pass existed.
+        enum class Topology { Triangle, Line };
+        Topology topology = Topology::Triangle;
     };
 
     // Describes one compute root signature + PSO. Root signature is fixed

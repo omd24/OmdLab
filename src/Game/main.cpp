@@ -2,6 +2,7 @@
 #include "Engine/Animation.h"
 #include "Engine/Camera.h"
 #include "Engine/ClipPlayback.h"
+#include "Engine/Collision.h"
 #include "Engine/Components.h"
 #include "Engine/Engine.h"
 #include "Engine/FixedTimestep.h"
@@ -10,6 +11,7 @@
 #include "Foundation/Debug.h"
 #include "Foundation/Log.h"
 #include "Foundation/Window.h"
+#include "Renderer/DebugDrawPass.h"
 #include "Renderer/RenderTasks.h"
 #include "InputBindings.h"
 #include "LocalTestScene.h"
@@ -115,6 +117,39 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     {
         characterClipNames.push_back(clip.name.c_str());
     }
+    // Default to "idle" by name, not clip index 0 - the export pipeline's clip order isn't
+    // something this code controls (observed to land alphabetically), so relying on index 0
+    // to mean anything in particular would be a silent, easy-to-break assumption now that the
+    // character has dozens of clips instead of one.
+    for (size_t i = 0; i < characterModel.clips.size(); ++i)
+    {
+        if (characterModel.clips[i].name == "idle")
+        {
+            registry.get<Engine::ClipPlayback>(characterEntity).clipIndex = static_cast<int32_t>(i);
+            break;
+        }
+    }
+
+    // A first estimate of the character's body extents (feet at Transform.position, ~1.8-unit
+    // standing height) - no per-state hurtbox profile exists yet, so this one box is always
+    // active regardless of pose. Checked visually against the "Collision debug draw" toggle
+    // below, not just guessed and left unverified.
+    registry.emplace<Engine::Hurtbox>(
+        characterEntity, Engine::Hurtbox{ { Engine::CollisionBox{ { 0.0f, 0.9f, 0.0f }, { 0.35f, 0.9f, 0.25f } } } });
+
+    // Collision module test rig (no real per-move hitbox/state data exists yet - that arrives
+    // with the content and state-machine steps) - hand-placed volumes purely to prove
+    // Engine::ResolveCollisions/BuildCollisionDebugLines end to end. Positioned off to either
+    // side by default (no overlap with the character's hurtbox at rest); dragged via the
+    // "Debug" section's sliders below to make hit/trigger events fire live.
+    const entt::entity testHitboxEntity = registry.create();
+    registry.emplace<Engine::Transform>(testHitboxEntity, Engine::Transform{ { 2.0f, 0.9f, 0.0f } });
+    registry.emplace<Engine::Hitbox>(testHitboxEntity, Engine::Hitbox{ Engine::CollisionBox{ {}, { 0.2f, 0.2f, 0.2f } }, /*moveId*/ 1 });
+
+    const entt::entity testTriggerEntity = registry.create();
+    registry.emplace<Engine::Transform>(testTriggerEntity, Engine::Transform{ { -2.0f, 0.9f, 0.0f } });
+    registry.emplace<Engine::TriggerVolume>(
+        testTriggerEntity, Engine::TriggerVolume{ Engine::CollisionBox{ {}, { 0.5f, 1.0f, 0.5f } }, /*triggerId*/ 1 });
 
     // Dev-only stress-test content (see the "Bulk external test content" working convention) -
     // empty (and a no-op) when local/ isn't present.
@@ -145,6 +180,9 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     Engine::FixedTimestepAccumulator simClock;
     Engine::InputHistory playerInputHistory;
     Engine::InputCommand lastInputCommand;
+    // Latest tick's collision resolution - read by the debug draw list below between ticks, the
+    // same "store the final answer" shape lastInputCommand already uses.
+    Engine::CollisionEvents lastCollisionEvents;
     const Engine::InputBindings fighterBindings = Game::MakeDefaultFighterBindings();
     auto lastFrameTime = std::chrono::steady_clock::now();
 
@@ -165,6 +203,13 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
             playerInputHistory.Push(lastInputCommand);
             // No sim state exists yet - a real fighter state machine will be the first real
             // tick consumer of playerInputHistory.
+
+            // Deterministic, fixed-tick per the networking-readiness design - resolved here, not
+            // once per render frame, even though nothing yet moves entities per tick (the debug
+            // sliders below move them at render rate instead, so overlap color can lag a tick
+            // behind a dragged slider - intentional, an honest side effect of ticks/frames being
+            // decoupled, not a bug).
+            lastCollisionEvents = Engine::ResolveCollisions(registry);
         }
 
         // rootTransform/meshWorldTransform are both Identity here, not characterRootTransform -
@@ -180,6 +225,12 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
                 characterModel, *characterSkin, clip, characterPlayback.playbackTimeSeconds, DirectX::XMMatrixIdentity(),
                 DirectX::XMMatrixIdentity(), *registry.get<Engine::SkinnedRenderable>(characterEntity).drawItem);
         }
+
+        // Rebuilt every render frame from the latest resolved tick's events (see above) - cheap
+        // at this entity count, and DebugDrawPass::SetLines is a no-op-shaped call to make
+        // regardless of whether the pass is actually toggled on (same "empty list draws nothing"
+        // reasoning as StaticMeshPass/SkinnedMeshPass).
+        Renderer::DebugDrawPass::SetLines(Engine::BuildCollisionDebugLines(registry, lastCollisionEvents));
 
         // Character is real, shipped content - shown above RenderTasks' own "Debug" section,
         // not inside it. Local test scene is dev-only content (see the "Bulk external test
@@ -229,6 +280,15 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
                     button.held ? "held" : "-", button.pressedThisTick ? "(P)" : "", button.releasedThisTick ? "(R)" : ""));
             }
             ImGui::Text("%s", buttonSummary);
+
+            // Collision module test rig - see the entity setup above for why these two entities
+            // exist. Enable "Collision debug draw" above to see the boxes; drag these to make
+            // the test hitbox overlap the character's hurtbox (turns red, Hits count increases)
+            // or the test trigger overlap it (turns red, Triggers count increases).
+            ImGui::SeparatorText("Collision (test rig)");
+            ImGui::SliderFloat("Test hitbox X", &registry.get<Engine::Transform>(testHitboxEntity).position.x, -3.0f, 3.0f);
+            ImGui::SliderFloat("Test trigger X", &registry.get<Engine::Transform>(testTriggerEntity).position.x, -3.0f, 3.0f);
+            ImGui::Text("Hits: %zu  Triggers: %zu", lastCollisionEvents.hits.size(), lastCollisionEvents.triggers.size());
         };
 
         if (Renderer::RenderTasks::DoFrame(viewProjection, primaryContentUI, debugSectionUI))
@@ -236,6 +296,8 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
             camera = Engine::Camera{};
             enableCharacter = true;
             enableLocalTestScene = false;
+            registry.get<Engine::Transform>(testHitboxEntity).position.x = 2.0f;
+            registry.get<Engine::Transform>(testTriggerEntity).position.x = -2.0f;
             rebuildDrawItems();
         }
     }

@@ -139,7 +139,8 @@ namespace Renderer
         psoDesc.VS = { desc.vertexShader->bytecode.data(), desc.vertexShader->bytecode.size() };
         psoDesc.PS = { desc.pixelShader->bytecode.data(), desc.pixelShader->bytecode.size() };
         psoDesc.InputLayout = { inputElements.data(), static_cast<UINT>(inputElements.size()) };
-        psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+        psoDesc.PrimitiveTopologyType =
+            desc.topology == GraphicsPipelineDesc::Topology::Line ? D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE : D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
 
         psoDesc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
         psoDesc.RasterizerState.CullMode = desc.cullBackFaces ? D3D12_CULL_MODE_BACK : D3D12_CULL_MODE_NONE;

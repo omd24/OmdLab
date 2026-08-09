@@ -2,6 +2,7 @@
 
 #include "BackgroundPass.h"
 #include "Buffer.h"
+#include "DebugDrawPass.h"
 #include "Device.h"
 #include "Foundation/Log.h"
 #include "ForwardPass.h"
@@ -50,12 +51,14 @@ namespace Renderer
             ForwardPass::Init();
             StaticMeshPass::Init();
             SkinnedMeshPass::Init();
+            DebugDrawPass::Init();
             ImGuiHelper::Init(window);
         }
 
         static void Shutdown()
         {
             ImGuiHelper::Shutdown();
+            DebugDrawPass::Shutdown();
             SkinnedMeshPass::Shutdown();
             StaticMeshPass::Shutdown();
             ForwardPass::Shutdown();
@@ -105,6 +108,10 @@ namespace Renderer
             // primaryContentUI) exists to look at instead.
             static bool enableBackgroundPass = false;
             static bool enableForwardPass = false;
+            // Also bring-up-only/off-by-default, same reasoning as the two above - unlike
+            // StaticMeshPass/SkinnedMeshPass (always-on, data-driven), this pass exists purely
+            // to visualize the collision module's volumes on request, not as default content.
+            static bool enableDebugDrawPass = false;
             bool resetRequested = false;
 
             ImGui::Begin("Renderer Debug");
@@ -123,6 +130,11 @@ namespace Renderer
                 Foundation::Log::Write(
                     Foundation::Log::Severity::Info, "Renderer", "Forward triangle pass %s", enableForwardPass ? "enabled" : "disabled");
             }
+            if (ImGui::Checkbox("Collision debug draw", &enableDebugDrawPass))
+            {
+                Foundation::Log::Write(
+                    Foundation::Log::Severity::Info, "Renderer", "Collision debug draw %s", enableDebugDrawPass ? "enabled" : "disabled");
+            }
             if (debugSectionUI)
             {
                 debugSectionUI();
@@ -131,6 +143,7 @@ namespace Renderer
             {
                 enableBackgroundPass = false;
                 enableForwardPass = false;
+                enableDebugDrawPass = false;
                 resetRequested = true;
                 Foundation::Log::Write(Foundation::Log::Severity::Info, "Renderer", "Reset to defaults");
             }
@@ -161,6 +174,10 @@ namespace Renderer
             // selection (see extraDebugUI above) already controls.
             StaticMeshPass::Render({ viewProjection });
             SkinnedMeshPass::Render({ viewProjection });
+            if (enableDebugDrawPass)
+            {
+                DebugDrawPass::Render({ viewProjection });
+            }
             ImGuiHelper::Render();
             Device::EndFrame();
 
