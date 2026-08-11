@@ -11,6 +11,11 @@
 # still overlapping.
 #
 # KO has no transitions out - no round-reset flow exists yet.
+#
+# Jump's total airtime (like Attack's move-authored duration, or HitStun's onHitStun/
+# onBlockStun) is precomputed once at entry from the closed-form projectile formula
+# 2*jumpSpeed/gravity (see FighterState.cpp) - animationFinished therefore needs zero new DSL
+# vocabulary to work for Jump, just a different stateDurationFrames formula at entry time.
 
 state Idle
 {
@@ -22,6 +27,11 @@ state Idle
     transition KO
     {
         require healthDepleted
+    }
+
+    transition Jump
+    {
+        require jumpPressed
     }
 
     transition Attack
@@ -52,6 +62,11 @@ state Walk
         require healthDepleted
     }
 
+    transition Jump
+    {
+        require jumpPressed
+    }
+
     transition Attack
     {
         require moveSelected
@@ -80,6 +95,11 @@ state Run
         require healthDepleted
     }
 
+    transition Jump
+    {
+        require jumpPressed
+    }
+
     transition Attack
     {
         require moveSelected
@@ -94,6 +114,24 @@ state Run
     transition Idle
     {
         require not runHeld
+    }
+}
+
+state Jump
+{
+    transition HitStun
+    {
+        require wasHit
+    }
+
+    transition KO
+    {
+        require healthDepleted
+    }
+
+    transition Idle
+    {
+        require animationFinished
     }
 }
 

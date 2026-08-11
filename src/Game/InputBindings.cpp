@@ -11,11 +11,13 @@ namespace Game
 
         auto& jump = bindings.buttons[static_cast<size_t>(FighterButton::Jump)];
         jump.primaryKey = VK_SPACE;
-        jump.gamepadInput = Engine::GamepadInput::ButtonA;
+        jump.gamepadInput = Engine::GamepadInput::DpadUp; // D-pad is the real fighting-game convention for movement.
+        jump.gamepadInputAlt = Engine::GamepadInput::LeftStickUp; // Stick also works, not required.
 
         auto& crouch = bindings.buttons[static_cast<size_t>(FighterButton::Crouch)];
         crouch.primaryKey = VK_LCONTROL;
-        crouch.gamepadInput = Engine::GamepadInput::LeftStickDown;
+        crouch.gamepadInput = Engine::GamepadInput::DpadDown;
+        crouch.gamepadInputAlt = Engine::GamepadInput::LeftStickDown;
 
         auto& punch = bindings.buttons[static_cast<size_t>(FighterButton::Punch)];
         punch.primaryKey = 'J';
@@ -35,6 +37,8 @@ namespace Game
 
         bindings.axis.negativeKey = 'A';
         bindings.axis.positiveKey = 'D';
+        bindings.axis.gamepadNegative = Engine::GamepadInput::DpadLeft;
+        bindings.axis.gamepadPositive = Engine::GamepadInput::DpadRight;
         bindings.axis.gamepadAxis = Engine::GamepadAxis::LeftStickX;
 
         return bindings;

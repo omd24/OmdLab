@@ -39,6 +39,17 @@ namespace Game
         // at the moment of the hit) - HitStun has no MoveDefinition of its own to read a clip
         // from the way "Attack" does, so this is set explicitly when the state is entered.
         std::string hitReactionClip;
+        // Which of the three directional jump clips to show while in "Jump" ("jump_forward",
+        // "jump_backward", or "jump_in_place") - like hitReactionClip, Jump has no
+        // MoveDefinition of its own to read a clip from, so this is resolved once (from the
+        // movement axis's sign) at the moment Jump is entered and held fixed for the arc's
+        // whole duration - no mid-air steering.
+        std::string jumpClip;
+        // Horizontal speed (units/second, signed - same "forward" convention as InputCommand::
+        // axis) locked in at the moment Jump is entered and reapplied every tick for the rest of
+        // the arc, rather than read live from input the way Walk/Run compute their own
+        // moveUnitsPerSecond - see jumpClip's own comment for why.
+        float jumpHorizontalSpeed = 0.0f;
     };
 
     struct Health

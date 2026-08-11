@@ -73,8 +73,8 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     Game::CombatDsl::CombatFile sharedStates;
     const bool sharedStatesLoaded = Game::CombatDsl::LoadCombatFile("data/combat_shared/states.combat", sharedStates);
     OMD_ASSERT(sharedStatesLoaded, "Failed to load data/combat_shared/states.combat");
-    OMD_ASSERT(sharedStates.states.size() == 6, "Expected 6 states in states.combat, got %zu", sharedStates.states.size());
-    for (const char* expectedState : { "Idle", "Walk", "Run", "Attack", "HitStun", "KO" })
+    OMD_ASSERT(sharedStates.states.size() == 7, "Expected 7 states in states.combat, got %zu", sharedStates.states.size());
+    for (const char* expectedState : { "Idle", "Walk", "Run", "Jump", "Attack", "HitStun", "KO" })
     {
         bool found = false;
         for (const Game::CombatDsl::StateDecl& state : sharedStates.states)
@@ -461,8 +461,8 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
                 const Game::Health& health = registry.get<Game::Health>(characterEntity);
                 const Engine::Transform& fighterTransform = registry.get<Engine::Transform>(characterEntity);
                 ImGui::Text(
-                    "State: %s  Frame: %u  Health: %d/%d  X: %.2f", fighterState.currentState.c_str(), fighterState.framesInState,
-                    health.current, health.max, fighterTransform.position.x);
+                    "State: %s  Frame: %u  Health: %d/%d  X: %.2f  Y: %.2f", fighterState.currentState.c_str(), fighterState.framesInState,
+                    health.current, health.max, fighterTransform.position.x, fighterTransform.position.y);
             }
 
             // Collision module test rig - see the entity setup above for why these two entities

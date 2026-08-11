@@ -64,8 +64,8 @@ namespace Engine
         for (size_t i = 0; i < kMaxInputButtons; ++i)
         {
             const InputBinding& binding = bindings.buttons[i];
-            const bool held =
-                (binding.primaryKey != 0 && Foundation::IsKeyDown(binding.primaryKey)) || GamepadInputHeld(gamepad, binding.gamepadInput);
+            const bool held = (binding.primaryKey != 0 && Foundation::IsKeyDown(binding.primaryKey)) ||
+                               GamepadInputHeld(gamepad, binding.gamepadInput) || GamepadInputHeld(gamepad, binding.gamepadInputAlt);
 
             ButtonState& state = command.buttons[i];
             state.held = held;
@@ -84,9 +84,11 @@ namespace Engine
         }
         if (axisValue == 0.0f)
         {
-            const float positive = (bindings.axis.positiveKey != 0 && Foundation::IsKeyDown(bindings.axis.positiveKey)) ? 1.0f : 0.0f;
-            const float negative = (bindings.axis.negativeKey != 0 && Foundation::IsKeyDown(bindings.axis.negativeKey)) ? 1.0f : 0.0f;
-            axisValue = positive - negative;
+            const bool positiveHeld = (bindings.axis.positiveKey != 0 && Foundation::IsKeyDown(bindings.axis.positiveKey)) ||
+                                       GamepadInputHeld(gamepad, bindings.axis.gamepadPositive);
+            const bool negativeHeld = (bindings.axis.negativeKey != 0 && Foundation::IsKeyDown(bindings.axis.negativeKey)) ||
+                                       GamepadInputHeld(gamepad, bindings.axis.gamepadNegative);
+            axisValue = (positiveHeld ? 1.0f : 0.0f) - (negativeHeld ? 1.0f : 0.0f);
         }
         command.axis = axisValue;
 

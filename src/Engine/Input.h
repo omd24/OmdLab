@@ -83,13 +83,22 @@ namespace Engine
     {
         int primaryKey = 0;
         GamepadInput gamepadInput = GamepadInput::None;
+        // Optional second gamepad source, checked in addition to gamepadInput (held if either
+        // fires) - e.g. binding both the D-pad and the analog stick to the same logical button so
+        // either works, rather than forcing a single choice between them.
+        GamepadInput gamepadInputAlt = GamepadInput::None;
     };
 
     struct AxisBinding
     {
         int negativeKey = 0; // Digital fallback, drives -1.
         int positiveKey = 0; // Digital fallback, drives +1.
-        // Preferred over the digital fallback once the stick clears its own deadzone.
+        // Digital gamepad fallback (e.g. D-pad Left/Right) - checked alongside the keyboard keys
+        // above, not instead of them, same "either source works" spirit as InputBinding::
+        // gamepadInputAlt.
+        GamepadInput gamepadNegative = GamepadInput::None;
+        GamepadInput gamepadPositive = GamepadInput::None;
+        // Preferred over both digital fallbacks once the stick clears its own deadzone.
         GamepadAxis gamepadAxis = GamepadAxis::None;
     };
 

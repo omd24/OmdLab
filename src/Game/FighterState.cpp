@@ -10,6 +10,13 @@
 
 namespace
 {
+    // Global, single-stage gravity for Jump's closed-form arc - not per-character/authored,
+    // matching the flat-single-stage, one-character-for-now scope. Paired with CharacterStats::
+    // jumpSpeed's own default so a neutral jump's total airtime lands close to jump_in_place's
+    // own ~1.967s as a starting anchor - an eyeball-tuned starting point, adjust either constant
+    // to change jump feel.
+    constexpr float kGravity = 3.0f;
+
     int32_t FindClipIndex(const std::vector<Asset::Clip>& clips, const std::string& name)
     {
         for (size_t i = 0; i < clips.size(); ++i)
@@ -72,6 +79,12 @@ namespace
         Engine::Transform& transform = registry.get<Engine::Transform>(entity);
         Engine::ClipPlayback& clipPlayback = registry.get<Engine::ClipPlayback>(entity);
 
+        // Grounded by default - only Jump's own branch below overrides this. No other state
+        // touches position.y, so without this reset, getting interrupted out of Jump early (hit
+        // mid-air -> HitStun) would otherwise leave the character stuck at whatever height it
+        // was hit at.
+        transform.position.y = 0.0f;
+
         float moveUnitsPerSecond = 0.0f;
         std::string clipName;
         const Game::MoveHitboxDef* activeHitbox = nullptr;
@@ -90,6 +103,16 @@ namespace
         {
             clipName = "running";
             moveUnitsPerSecond = characterDefinition.stats.runSpeed * input.axis;
+        }
+        else if (state.currentState == "Jump")
+        {
+            clipName = state.jumpClip.empty() ? "jump_in_place" : state.jumpClip;
+            moveUnitsPerSecond = state.jumpHorizontalSpeed;
+            const float t = static_cast<float>(state.framesInState) * Engine::FixedTimestepAccumulator::kFixedDeltaSeconds;
+            // Closed-form parabola, evaluated directly from framesInState each tick (same
+            // pattern SetClip already uses) - the max(0, ...) clamp is the entire "don't go
+            // through the floor" mechanism, valid because the stage is flat.
+            transform.position.y = std::max(0.0f, characterDefinition.stats.jumpSpeed * t - 0.5f * kGravity * t * t);
         }
         else if (state.currentState == "Attack")
         {
@@ -227,6 +250,7 @@ namespace Game
             {
                 if (name == "moveAxisNonZero") return std::fabs(input.thisTickInput.axis) > kAxisDeadzone;
                 if (name == "runHeld") return input.thisTickInput.buttons[static_cast<size_t>(FighterButton::Run)].held;
+                if (name == "jumpPressed") return input.thisTickInput.buttons[static_cast<size_t>(FighterButton::Jump)].pressedThisTick;
                 if (name == "moveSelected") return selectedMoveId.has_value();
                 if (name == "wasHit") return wasHitThisTick;
                 if (name == "healthDepleted") return registry.get<Health>(entity).current <= 0;
@@ -258,6 +282,38 @@ namespace Game
                     if (state.currentState == "Attack")
                     {
                         EnterState(state, input.characterDefinition, selectedMoveId.value_or(""));
+                    }
+                    else if (state.currentState == "Jump")
+                    {
+                        EnterState(state, input.characterDefinition, "");
+                        // Direction locked at takeoff from the movement axis's sign at this exact
+                        // instant, no mid-air steering afterward - see FighterState.h's own
+                        // comment on jumpHorizontalSpeed.
+                        const float axis = input.thisTickInput.axis;
+                        const float walkSpeed = input.characterDefinition.stats.walkSpeed;
+                        if (axis > kAxisDeadzone)
+                        {
+                            state.jumpClip = "jump_forward";
+                            state.jumpHorizontalSpeed = walkSpeed;
+                        }
+                        else if (axis < -kAxisDeadzone)
+                        {
+                            state.jumpClip = "jump_backward";
+                            state.jumpHorizontalSpeed = -walkSpeed;
+                        }
+                        else
+                        {
+                            state.jumpClip = "jump_in_place";
+                            state.jumpHorizontalSpeed = 0.0f;
+                        }
+                        // Total airtime from the closed-form parabola's own root - precomputed
+                        // once here exactly the way Attack/HitStun precompute their own
+                        // stateDurationFrames, so landing falls out of the existing
+                        // animationFinished flag for free.
+                        const float jumpSpeed = input.characterDefinition.stats.jumpSpeed;
+                        const float totalAirtimeSeconds = kGravity > 0.0f ? (2.0f * jumpSpeed / kGravity) : 0.0f;
+                        state.stateDurationFrames = static_cast<uint32_t>(
+                            std::round(totalAirtimeSeconds / Engine::FixedTimestepAccumulator::kFixedDeltaSeconds));
                     }
                     else if (state.currentState == "HitStun" && attackingMove != nullptr)
                     {

@@ -67,6 +67,8 @@ namespace Game
         int32_t maxHealth = 100;
         float walkSpeed = 2.0f;
         float runSpeed = 4.0f;
+        float jumpSpeed = 3.0f; // Initial vertical launch speed for Jump - paired with FighterState.cpp's
+                                 // kGravity, which a jump's total airtime (2*jumpSpeed/kGravity) is derived from.
     };
 
     // A fighter entity is instantiated FROM this, never hand-assembled per-character in code.
