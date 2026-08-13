@@ -1,5 +1,6 @@
 #include "FighterState.h"
 
+#include "GameConstants.h"
 #include "InputBindings.h"
 #include "Engine/ClipPlayback.h"
 #include "Engine/Components.h"
@@ -146,6 +147,12 @@ namespace
         {
             transform.position.x += moveUnitsPerSecond * Engine::FixedTimestepAccumulator::kFixedDeltaSeconds;
         }
+        // Stage bounds - applied once here regardless of which state above actually moved the
+        // character (Walk/Run/Jump all funnel through moveUnitsPerSecond), same "one clamp,
+        // not one per state" reasoning as Jump's own Y-ground clamp. kStageHalfWidth is also
+        // what the ground plane's own mesh is sized from (GroundPlane.cpp) - one shared constant
+        // so the visible floor and this clamp can't drift out of sync with each other.
+        transform.position.x = std::clamp(transform.position.x, -Game::kStageHalfWidth, Game::kStageHalfWidth);
         if (!clipName.empty())
         {
             SetClip(clipPlayback, availableClips, clipName, state.framesInState);

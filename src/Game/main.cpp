@@ -15,6 +15,7 @@
 #include "Renderer/RenderTasks.h"
 #include "CombatDsl.h"
 #include "FighterState.h"
+#include "GroundPlane.h"
 #include "InputBindings.h"
 #include "LocalTestScene.h"
 #include "MoveTable.h"
@@ -235,21 +236,29 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     bool enableLocalTestScene = false;
 #endif
 
-    // The character (GPU-skinned) and local test scene (rigid) are different draw item types
-    // feeding different passes - StaticMeshPass/SkinnedMeshPass never learn a "character" or
-    // "local test scene" exists (the Renderer/Asset dependency rule), each only ever sees its
-    // own flat draw item list. Which categories are actually included is a Game-owned decision,
-    // re-applied whenever the debug checkboxes below change - cheap, since the underlying GPU
-    // buffers/textures were already uploaded once above and this only rebuilds the item lists.
+    // The stage fighters stand/fight on - real shipped content, not dev-only, so always
+    // included below rather than gated behind a checkbox the way the local test scene is.
+    std::vector<Renderer::StaticMeshDrawItem> groundPlaneDrawItems{ Game::CreateGroundPlaneDrawItem() };
+
+    // The character (GPU-skinned) and local test scene/ground plane (rigid) are different draw
+    // item types feeding different passes - StaticMeshPass/SkinnedMeshPass never learn a
+    // "character"/"local test scene"/"ground plane" exists (the Renderer/Asset dependency rule),
+    // each only ever sees its own flat draw item list. Which categories are actually included is
+    // a Game-owned decision, re-applied whenever the debug checkboxes below change - cheap,
+    // since the underlying GPU buffers/textures were already uploaded once above and this only
+    // rebuilds the item lists.
     bool enableCharacter = true;
     auto rebuildDrawItems = [&]()
     {
         Renderer::SkinnedMeshPass::SetDrawItems(enableCharacter ? characterDrawItems : std::vector<Renderer::SkinnedMeshDrawItem>{});
+        std::vector<Renderer::StaticMeshDrawItem> staticItems = groundPlaneDrawItems;
 #ifdef OMD_DEV_TOOLS
-        Renderer::StaticMeshPass::SetDrawItems(enableLocalTestScene ? localTestSceneDrawItems : std::vector<Renderer::StaticMeshDrawItem>{});
-#else
-        Renderer::StaticMeshPass::SetDrawItems({});
+        if (enableLocalTestScene)
+        {
+            staticItems.insert(staticItems.end(), localTestSceneDrawItems.begin(), localTestSceneDrawItems.end());
+        }
 #endif
+        Renderer::StaticMeshPass::SetDrawItems(staticItems);
     };
     rebuildDrawItems();
 
@@ -262,6 +271,13 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     // what's under the cursor," WantCaptureMouse covers the common case (dragging a slider or
     // clicking a checkbox) automatically, without needing to remember to flip this first.
     bool enableCameraMouseControl = true;
+    // The free-fly camera's own gamepad move axis and the fighter's movement axis both read the
+    // same physical left stick (Engine::GamepadAxis::LeftStickX) - moving the camera with a
+    // gamepad inevitably also walks the character, which can walk it straight into the dev
+    // test-hitbox rig (or off the stage edge) while someone's just trying to look around. On by
+    // default is wrong (it would silently eat real gameplay input), so this stays off by
+    // default and is purely an opt-in navigation aid.
+    bool freezeCharacterMovement = false;
 #endif
     // Fixed-timestep sim loop skeleton - no sim state exists yet to actually drive with this;
     // it proves ticks run at a fixed rate decoupled from render rate, and that a per-tick
@@ -307,6 +323,15 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
         while (simClock.TryConsumeTick())
         {
             lastInputCommand = Engine::AssembleInputCommand(simClock.tickCount, fighterBindings, lastInputCommand, /*gamepadIndex*/ 0);
+#ifdef OMD_DEV_TOOLS
+            // See freezeCharacterMovement's own declaration - zeroed here, before push/use, so
+            // every downstream consumer (SelectMove, UpdateFighterState, InputHistory itself)
+            // consistently sees "no movement input" rather than each needing its own check.
+            if (freezeCharacterMovement)
+            {
+                lastInputCommand.axis = 0.0f;
+            }
+#endif
             playerInputHistory.Push(lastInputCommand);
 
             // Debug readout only for now (Phase 3) - only overwritten on an actual selection
@@ -431,6 +456,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
             // active" mode switch, not a mouse-specific concern like this one).
             ImGui::SeparatorText("Camera");
             ImGui::Checkbox("Camera mouse control", &enableCameraMouseControl);
+            ImGui::Checkbox("Freeze character movement (gamepad camera nav)", &freezeCharacterMovement);
 
             // Visualizes the fixed-tick loop and the InputCommand it produces, since nothing
             // else consumes either yet. One line per concern to stay compact in this
@@ -479,6 +505,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
         {
             camera = Engine::Camera{};
             enableCameraMouseControl = true;
+            freezeCharacterMovement = false;
             enableCharacter = true;
             enableLocalTestScene = false;
             manualClipOverride = false;
