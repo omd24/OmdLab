@@ -1,0 +1,23 @@
+# Fighter input bindings - hot-reloaded at runtime (edit and save, no relaunch needed).
+#
+# One row per button: name, keyboard key, primary gamepad input, secondary gamepad input.
+# "-" means no binding for that slot. Keyboard key names: a single letter/digit (J, K, L, A, D,
+# ...), or one of: Space, LControl, LShift. Gamepad names match Engine::GamepadInput exactly:
+# ButtonA, ButtonB, ButtonX, ButtonY, LeftShoulder, RightShoulder, DpadUp, DpadDown, DpadLeft,
+# DpadRight, LeftStickUp, LeftStickDown, LeftStickLeft, LeftStickRight, RightStickUp,
+# RightStickDown, RightStickLeft, RightStickRight.
+#
+# Button    Key       GamepadPrimary   GamepadSecondary
+Jump        Space     DpadUp           LeftStickUp
+Crouch      LControl  DpadDown         LeftStickDown
+Punch       J         ButtonX          -
+Kick        K         ButtonB          -
+Block       LShift    RightShoulder    -
+Run         L         LeftShoulder     -
+
+# One row for the movement axis: negative key, positive key, gamepad negative, gamepad positive,
+# gamepad analog axis (LeftStickX/LeftStickY/RightStickX/RightStickY - the analog stick always
+# takes priority over the four digital fields once it clears its own deadzone).
+#
+# Axis      NegKey  PosKey  GamepadNeg  GamepadPos  GamepadAnalog
+Axis         A       D       DpadLeft    DpadRight   LeftStickX

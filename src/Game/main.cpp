@@ -27,7 +27,9 @@
 #include <chrono>
 #include <cstdio>
 #include <entt.hpp>
+#include <filesystem>
 #include <imgui.h>
+#include <system_error>
 #include <vector>
 
 // DirectX Agility SDK activation. Must live in the exe (not a static lib) -
@@ -297,7 +299,27 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     // and UpdateFighterState is skipped entirely for this entity so it can't fight back over the
     // manual selection. Off by default - real gameplay is game-driven, this is a testing aid.
     bool manualClipOverride = false;
-    const Engine::InputBindings fighterBindings = Game::MakeDefaultFighterBindings();
+
+    // Data-driven, hot-reloaded (see the polling below) - MakeDefaultFighterBindings() is only
+    // the fallback for a missing/malformed file, never itself edited to rebind anything anymore.
+    constexpr const char* kInputBindingsPath = "data/input_bindings.txt";
+    Engine::InputBindings fighterBindings = Game::MakeDefaultFighterBindings();
+    if (!Game::LoadFighterBindingsFromFile(kInputBindingsPath, fighterBindings))
+    {
+        Foundation::Log::Write(
+            Foundation::Log::Severity::Warning, "Game", "Falling back to built-in default input bindings (failed to load %s)",
+            kInputBindingsPath);
+    }
+    std::filesystem::file_time_type lastBindingsWriteTime{};
+    {
+        std::error_code writeTimeError;
+        lastBindingsWriteTime = std::filesystem::last_write_time(kInputBindingsPath, writeTimeError);
+    }
+    // Checked at most once a second (see the timer below) - editing a bindings file and tabbing
+    // back to see it take effect is not a sub-second-latency workflow, and this avoids stat()-ing
+    // the file 60+ times a second for no reason.
+    float bindingsReloadTimer = 0.0f;
+
     auto lastFrameTime = std::chrono::steady_clock::now();
 
     while (Foundation::PumpMessages())
@@ -305,6 +327,27 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
         const auto now = std::chrono::steady_clock::now();
         const float deltaSeconds = std::chrono::duration<float>(now - lastFrameTime).count();
         lastFrameTime = now;
+
+        bindingsReloadTimer += deltaSeconds;
+        if (bindingsReloadTimer >= 1.0f)
+        {
+            bindingsReloadTimer = 0.0f;
+            std::error_code writeTimeError;
+            const std::filesystem::file_time_type currentWriteTime = std::filesystem::last_write_time(kInputBindingsPath, writeTimeError);
+            if (!writeTimeError && currentWriteTime != lastBindingsWriteTime)
+            {
+                lastBindingsWriteTime = currentWriteTime;
+                Engine::InputBindings reloaded;
+                if (Game::LoadFighterBindingsFromFile(kInputBindingsPath, reloaded))
+                {
+                    fighterBindings = reloaded;
+                    Foundation::Log::Write(Foundation::Log::Severity::Info, "Game", "Reloaded input bindings from %s", kInputBindingsPath);
+                }
+                // On failure, LoadFighterBindingsFromFile has already logged why and left
+                // fighterBindings untouched - still using whatever last loaded successfully,
+                // not silently falling back to the built-in default mid-session.
+            }
+        }
 
 #ifdef OMD_DEV_TOOLS
         // io.WantCaptureMouse reflects the previous frame's ImGui state (this frame's NewFrame()
