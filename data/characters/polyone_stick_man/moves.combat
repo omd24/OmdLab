@@ -7,6 +7,14 @@
 # frames, kick_light = 1.300s = 78 frames. First real tuning pass, still easy to retune further
 # once real play makes clear whether punch/kick feel right relative to each other - just keep the
 # three frame counts summing to the clip's own length.
+#
+# A hitbox's optional "bone" field names a real joint (see the character's own skeleton - e.g.
+# "RightHand_014", "RightFoot_020") for the box to follow through the move's animated pose,
+# instead of sitting at a fixed offset from the character's root the whole active window (which
+# would only ever be correctly placed for one instant of a moving limb, not the rest of it).
+# offsetX/Y/Z become a small refinement relative to that joint's own current position, not the
+# box's sole positioning - first-guess values below, easy to retune once real play/collision-
+# debug-draw makes clear whether they read as centered on the fist/foot.
 
 move punch
 {
@@ -22,12 +30,13 @@ move punch
 
     hitbox
     {
-        offsetX 0.3
-        offsetY 0.9
+        bone "LeftHand_010"
+        offsetX 0
+        offsetY 0
         offsetZ 0
-        halfX 0.25
-        halfY 0.2
-        halfZ 0.2
+        halfX 0.15
+        halfY 0.15
+        halfZ 0.15
     }
 
     cancel kick_light
@@ -51,11 +60,12 @@ move kick_light
 
     hitbox
     {
-        offsetX 0.4
-        offsetY 0.5
+        bone "LeftFoot_017"
+        offsetX 0
+        offsetY 0
         offsetZ 0
-        halfX 0.3
-        halfY 0.25
-        halfZ 0.25
+        halfX 0.18
+        halfY 0.18
+        halfZ 0.18
     }
 }

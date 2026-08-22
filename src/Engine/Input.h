@@ -119,7 +119,18 @@ namespace Engine
     // networking-readiness goal of keeping sim-adjacent code deterministic/replay-friendly.
     //
     // gamepadIndex: XInput slot 0-3, per Foundation::GetGamepadState.
-    InputCommand AssembleInputCommand(uint32_t tick, const InputBindings& bindings, const InputCommand& previous, int gamepadIndex);
+    //
+    // ignoreGamepadAnalogAxis: debug-only override (default false, no behavior change for any
+    // existing caller) - skips bindings.axis.gamepadAxis's own analog-stick priority, falling
+    // straight through to the digital fallback (keyboard keys, or bindings.axis.gamepadNegative/
+    // gamepadPositive, e.g. the D-pad) as if no analog stick were connected. Exists because a
+    // free-fly debug camera that also reads the same physical stick for its own movement (see
+    // Engine::Camera.cpp) has no way to "have" the stick without a fighter entity also reading
+    // it as movement input - this lets a caller give the stick to the camera exclusively without
+    // touching InputBindings itself (which would also disable the D-pad, not just the stick).
+    InputCommand AssembleInputCommand(
+        uint32_t tick, const InputBindings& bindings, const InputCommand& previous, int gamepadIndex,
+        bool ignoreGamepadAnalogAxis = false);
 
     // Fixed-size ring buffer of recent InputCommands - the raw material any future combo/
     // motion-input matcher scans back over. 64 ticks (~1.07s at FixedTimestepAccumulator's

@@ -12,6 +12,11 @@
 #include <string>
 #include <vector>
 
+namespace Asset
+{
+    struct Model;
+}
+
 namespace Game
 {
     // Per-entity state-machine state - which of the shared states.combat states this fighter is
@@ -89,6 +94,14 @@ namespace Game
         const CombatDsl::CombatFile& sharedStates;
         const CharacterDefinition& characterDefinition;
         const std::vector<Asset::Clip>& availableClips; // Resolves a state/move's animationClip name to a ClipPlayback index.
+        const Asset::Model& characterModel; // Needed to resolve a bone-attached hitbox's current joint position - see FighterState.cpp.
+        // Debug aid: while in Attack, shows the active move's hitbox for the state's whole
+        // duration instead of gating it to the move's own authored active-frame window - lets a
+        // bone-attached hitbox's tracking be watched continuously (via "Collision debug draw")
+        // instead of racing an often sub-200ms real active window. False in every real build path
+        // except a dev-tools debug checkbox - never changes hit resolution itself, only whether
+        // the box exists on ticks it normally wouldn't.
+        bool forceShowAllHitboxes = false;
     };
 
     // The per-tick state-machine executor - evaluates the current state's transitions (from

@@ -54,7 +54,8 @@ namespace
 
 namespace Engine
 {
-    InputCommand AssembleInputCommand(uint32_t tick, const InputBindings& bindings, const InputCommand& previous, int gamepadIndex)
+    InputCommand AssembleInputCommand(
+        uint32_t tick, const InputBindings& bindings, const InputCommand& previous, int gamepadIndex, bool ignoreGamepadAnalogAxis)
     {
         const Foundation::GamepadState gamepad = Foundation::GetGamepadState(gamepadIndex);
 
@@ -74,7 +75,7 @@ namespace Engine
         }
 
         float axisValue = 0.0f;
-        if (gamepad.connected && bindings.axis.gamepadAxis != GamepadAxis::None)
+        if (!ignoreGamepadAnalogAxis && gamepad.connected && bindings.axis.gamepadAxis != GamepadAxis::None)
         {
             const float stickValue = GamepadAxisValue(gamepad, bindings.axis.gamepadAxis);
             if (fabsf(stickValue) > kGamepadStickThreshold)

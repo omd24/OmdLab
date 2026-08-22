@@ -15,6 +15,12 @@ namespace Renderer
     // path, this uses a real default-heap resource plus an upload-heap staging copy, since
     // textures are sampled far more often than the tiny one-shot vertex buffer that made
     // upload-heap-only acceptable there.
+    //
+    // TODO(OM): single mip level only (see TextureDX12::Create) - fine for textures viewed at a
+    // roughly steady distance/angle (the character), but a surface viewed at a grazing angle
+    // receding into the distance (the ground plane's checkerboard) visibly shimmers/aliases with
+    // no mip chain to sample a pre-filtered average from. Generate a real mip chain (+ update the
+    // SRV's MipLevels and the upload path to copy each level) once a surface actually needs it.
     struct Texture : public OMD_GFX_CLASS(Texture)
     {
         static TextureHandle Create(const void* pixels, unsigned int width, unsigned int height)

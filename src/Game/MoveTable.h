@@ -3,9 +3,15 @@
 #include "CombatDsl.h"
 #include "Engine/Collision.h"
 
+#include <DirectXMath.h>
 #include <cstdint>
 #include <string>
 #include <vector>
+
+namespace Asset
+{
+    struct Model;
+}
 
 namespace Game
 {
@@ -27,6 +33,15 @@ namespace Game
         Engine::CollisionBox box;
         uint32_t frameStart = 0;
         uint32_t frameEnd = 0;
+        // Optional bone attachment (authored as a "bone <name>" field inside hitbox { } - see
+        // MoveTable.cpp's BuildHitboxShape). Empty means today's behavior unchanged: box.offset
+        // is relative to the entity's own root Transform. Non-empty names an Asset::Node by its
+        // real name (e.g. "RightHand_014") - resolved once at startup (ResolveHitboxJoints)
+        // into resolvedJointIndex rather than searched by string every tick; FighterState.cpp
+        // then reads that joint's own current animated position each tick box.offset becomes a
+        // small refinement relative to, instead of the sole source of the box's position.
+        std::string boneName;
+        int32_t resolvedJointIndex = -1;
     };
 
     // One move's full data, built from a parsed CombatDsl::MoveDecl (see BuildMoveTable) -
@@ -77,6 +92,35 @@ namespace Game
         std::string modelDirectory;
         CharacterStats stats;
         MoveTable moveTable;
+        // Corrective transform this character's specific source asset's MESH VERTEX data needs
+        // applied to land in true game-world units/position - see Engine::
+        // CreateSkinnedMeshDrawItems's own rootTransform parameter for the scale quirk this
+        // exists to correct (a Sketchfab FBX->glTF export baking a 0.01 unit-conversion scale
+        // this asset's skin data doesn't otherwise account for). Lives here (not just a
+        // main.cpp-local, which is where it used to live) as a single source of truth for
+        // whichever future code needs it a second place, even though FighterState.cpp's
+        // bone-attached hitbox lookup turned out NOT to need it - verified empirically that this
+        // asset's joint/skeleton hierarchy is already true-scale on its own, unlike its mesh
+        // vertex data (see ResolveHitboxOffset's own comment for the full story). Identity by
+        // default - only a real character asset with a known quirk needs to set this to anything
+        // else. Stored as XMFLOAT4X4, not XMMATRIX, matching this project's convention of never
+        // storing the SIMD-register type as a class member (XMLoadFloat4x4/XMStoreFloat4x4 at
+        // the point of use, same as every other persisted matrix in this codebase).
+        DirectX::XMFLOAT4X4 assetCorrection = { 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f };
+        // A second, DELIBERATELY SEPARATE corrective rotation (radians, around world +Y) - not
+        // folded into assetCorrection above, because it means something different: assetCorrection
+        // fixes an accidental *import artifact* affecting only mesh vertex data (empirically not
+        // the skeleton); this fixes which way the character actually faces, a real property of
+        // the whole rigid character (mesh AND skeleton alike, since they must stay visually
+        // consistent with each other) that this project cares about for gameplay reasons - the
+        // ground plane/movement/camera all already assume a 2D side view (camera looking down
+        // +Z, X is the screen-horizontal gameplay axis), but this character's own source asset
+        // was authored facing along Z, showing its front/back to that camera instead of a
+        // profile. Applied everywhere assetCorrection's scale is NOT (both mesh render AND
+        // bone-attached hitbox lookups - see ResolveHitboxOffset), since unlike the scale quirk
+        // this must move the skeleton too, or a hitbox would visibly detach from the mesh it's
+        // meant to track. 0 (no correction) by default.
+        float facingCorrectionRadians = 0.0f;
     };
 
     // Maps a parsed CombatFile's stringly-typed MoveDecls onto real MoveDefinition fields.
@@ -85,4 +129,12 @@ namespace Game
     // parsed file by rvalue reference since it consumes (moves out of) each MoveDecl's cancel
     // list rather than copying it - CombatDsl::Condition is move-only.
     bool BuildMoveTable(CombatDsl::CombatFile&& parsedFile, MoveTable& outTable);
+
+    // One-time resolution of every hitbox's optional bone attachment (MoveHitboxDef::boneName)
+    // from a name to a stable Asset::Model node index - called once at startup after both the
+    // character's model and move table are loaded, not searched by string every tick. Logs (but
+    // doesn't fail loudly on) any boneName that doesn't match a real node name, leaving
+    // resolvedJointIndex at -1 - FighterState.cpp treats that identically to "no bone was ever
+    // authored," so a typo degrades to the old root-relative behavior rather than crashing.
+    void ResolveHitboxJoints(const Asset::Model& model, MoveTable& moveTable);
 }

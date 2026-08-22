@@ -1,5 +1,6 @@
 #include "MoveTable.h"
 
+#include "Asset/Model.h"
 #include "Foundation/Log.h"
 
 #include <utility>
@@ -22,7 +23,7 @@ namespace
     // common case for a single-hitbox move - overridable below for a future multi-hit move.
     Engine::CollisionBox BuildHitboxShape(
         const Game::CombatDsl::FieldBlock& block, uint32_t& outFrameStart, uint32_t& outFrameEnd, uint32_t moveStartupFrames,
-        uint32_t moveActiveFrames)
+        uint32_t moveActiveFrames, std::string& outBoneName)
     {
         Engine::CollisionBox box;
         outFrameStart = moveStartupFrames;
@@ -38,6 +39,7 @@ namespace
             else if (name == "halfZ") box.halfExtents.z = numberValue;
             else if (name == "frameStart") outFrameStart = static_cast<uint32_t>(value.numberValue);
             else if (name == "frameEnd") outFrameEnd = static_cast<uint32_t>(value.numberValue);
+            else if (name == "bone") outBoneName = value.stringValue;
             else Foundation::Log::Write(Severity::Warning, "MoveTable", "unknown hitbox field '%s'", name.c_str());
         }
         return box;
@@ -103,7 +105,8 @@ namespace Game
             for (const CombatDsl::FieldBlock& hitboxBlock : moveDecl.hitboxes)
             {
                 MoveHitboxDef hitboxDef;
-                hitboxDef.box = BuildHitboxShape(hitboxBlock, hitboxDef.frameStart, hitboxDef.frameEnd, move.startupFrames, move.activeFrames);
+                hitboxDef.box = BuildHitboxShape(
+                    hitboxBlock, hitboxDef.frameStart, hitboxDef.frameEnd, move.startupFrames, move.activeFrames, hitboxDef.boneName);
                 move.hitboxes.push_back(hitboxDef);
             }
 
@@ -111,5 +114,34 @@ namespace Game
             outTable.moves.push_back(std::move(move));
         }
         return true;
+    }
+
+    void ResolveHitboxJoints(const Asset::Model& model, MoveTable& moveTable)
+    {
+        for (MoveDefinition& move : moveTable.moves)
+        {
+            for (MoveHitboxDef& hitboxDef : move.hitboxes)
+            {
+                if (hitboxDef.boneName.empty())
+                {
+                    continue;
+                }
+                hitboxDef.resolvedJointIndex = -1;
+                for (size_t i = 0; i < model.nodes.size(); ++i)
+                {
+                    if (model.nodes[i].name == hitboxDef.boneName)
+                    {
+                        hitboxDef.resolvedJointIndex = static_cast<int32_t>(i);
+                        break;
+                    }
+                }
+                if (hitboxDef.resolvedJointIndex < 0)
+                {
+                    Foundation::Log::Write(
+                        Severity::Error, "MoveTable", "move '%s' hitbox references unknown bone '%s' - falling back to root-relative",
+                        move.id.c_str(), hitboxDef.boneName.c_str());
+                }
+            }
+        }
     }
 }

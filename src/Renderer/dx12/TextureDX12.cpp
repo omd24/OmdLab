@@ -110,6 +110,8 @@ namespace Renderer
         resourceDesc.Width = width;
         resourceDesc.Height = height;
         resourceDesc.DepthOrArraySize = 1;
+        // TODO(OM): no mip chain - see Texture.h's own TODO for the visible symptom (distant/
+        // grazing-angle shimmer) and trigger condition this exists under.
         resourceDesc.MipLevels = 1;
         resourceDesc.Format = kTextureFormat;
         resourceDesc.SampleDesc.Count = 1;

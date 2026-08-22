@@ -2,6 +2,8 @@
 
 #include "GameConstants.h"
 #include "InputBindings.h"
+#include "Asset/Model.h"
+#include "Engine/Animation.h"
 #include "Engine/ClipPlayback.h"
 #include "Engine/Components.h"
 #include "Engine/FixedTimestep.h"
@@ -50,6 +52,75 @@ namespace
         playback.playbackTimeSeconds = t;
     }
 
+    // Computes the world-space offset (relative to the entity's own Transform, matching
+    // Engine::ComputeWorldAabb's own "position + offset" contract) a hitbox should use this
+    // tick. Root-relative (today's original behavior, returns the authored offset unchanged)
+    // when no bone is attached; otherwise reads the named joint's own current animated position
+    // - via the exact same Engine::EvaluateNodeWorldTransforms call UpdateSkinnedPose already
+    // makes once per render frame for the visible mesh (main.cpp), just for one joint's position
+    // here instead of the whole skin - harmless duplicate work at this entity count, same
+    // precedent as SelectMove already being evaluated twice per tick. The authored offset is
+    // still added on top as a small world-axis-aligned refinement, not rotated into the joint's
+    // own orientation - CollisionBox itself already ignores rotation everywhere else in this
+    // system (see its own header comment), so this isn't a new inconsistency, just the same one.
+    DirectX::XMFLOAT3 ResolveHitboxOffset(
+        const Game::MoveHitboxDef& hitboxDef, const Game::CharacterDefinition& characterDefinition, const Asset::Model& model,
+        const std::vector<Asset::Clip>& availableClips, const std::string& clipName, uint32_t framesElapsed,
+        const Engine::Transform& entityTransform)
+    {
+        if (hitboxDef.resolvedJointIndex < 0)
+        {
+            return hitboxDef.box.offset;
+        }
+
+        const int32_t clipIndex = FindClipIndex(availableClips, clipName);
+        if (clipIndex < 0)
+        {
+            // Shouldn't happen - SetClip already resolved this exact same clip name this same
+            // tick. Fail soft rather than crash: root-relative is a worse-but-safe placement.
+            return hitboxDef.box.offset;
+        }
+        const Asset::Clip& clip = availableClips[static_cast<size_t>(clipIndex)];
+        float t = static_cast<float>(framesElapsed) * Engine::FixedTimestepAccumulator::kFixedDeltaSeconds;
+        if (clip.durationSeconds > 0.0f)
+        {
+            t = fmodf(t, clip.durationSeconds);
+        }
+
+        // rootTransform = Identity here on purpose, matching UpdateSkinnedPose's own call.
+        // Deliberately NOT multiplying by characterDefinition.assetCorrection (the 100x mesh-
+        // vertex-scale fix - see its own comment) - verified empirically (a per-tick log across
+        // a whole punch's active window) that this asset's joint/skeleton hierarchy is already
+        // in true world-scale units on its own, unlike the mesh's own vertex data. Applying the
+        // correction here produced positions ~100x too large (hand height ~110 instead of ~1.1);
+        // omitting it lands exactly where a hand should be, and the position visibly tracks
+        // smoothly through the punch's whole arc. Plausible cause, not fully root-caused: this
+        // asset's skeleton root likely isn't a descendant of the mesh's own scale-wrapper node -
+        // common for retargeted rigs where the Armature and mesh are siblings rather than
+        // nested - so worth re-verifying if a future character asset needs bone attachment too,
+        // rather than assuming this asset's behavior generalizes.
+        const std::vector<DirectX::XMMATRIX> nodeWorldTransforms =
+            Engine::EvaluateNodeWorldTransforms(model, DirectX::XMMatrixIdentity(), &clip, t);
+        // facingCorrectionRadians (unlike assetCorrection's scale, just above) DOES apply here -
+        // see its own comment on CharacterDefinition for why: it has to move the skeleton, or a
+        // hitbox would visibly detach from the mesh it's meant to track.
+        const DirectX::XMMATRIX facingCorrection = DirectX::XMMatrixRotationY(characterDefinition.facingCorrectionRadians);
+        const DirectX::XMMATRIX jointToWorld = nodeWorldTransforms[static_cast<size_t>(hitboxDef.resolvedJointIndex)] * facingCorrection *
+                                                Engine::ComputeWorldMatrix(entityTransform);
+        DirectX::XMFLOAT3 jointWorldPos;
+        DirectX::XMStoreFloat3(&jointWorldPos, DirectX::XMVector3TransformCoord(DirectX::XMVectorZero(), jointToWorld));
+
+        // Relative to the entity's own Transform.position - ComputeWorldAabb adds that back on
+        // top at collision-test time, the same "offset is relative to the entity" contract a
+        // root-relative hitbox already relies on, just computed from the joint's live position
+        // instead of a fixed authored number.
+        return DirectX::XMFLOAT3{
+            jointWorldPos.x - entityTransform.position.x + hitboxDef.box.offset.x,
+            jointWorldPos.y - entityTransform.position.y + hitboxDef.box.offset.y,
+            jointWorldPos.z - entityTransform.position.z + hitboxDef.box.offset.z,
+        };
+    }
+
     // Sets up FighterState for having just entered a state - shared by both the states.combat
     // transition path and the in-Attack cancel path below, since a cancel is "leave one move,
     // enter another" without a state change, which needs almost the same bookkeeping as a real
@@ -75,7 +146,7 @@ namespace
     // "HitStun"/"KO" mean (see FighterState.h's own comment for why that split is deliberate:
     // the design doc explicitly sanctions the executor knowing state names, just not baking that
     // knowledge into the generic parts).
-    void ApplyStateEffects(entt::registry& registry, entt::entity entity, const Game::FighterState& state, const Game::CharacterDefinition& characterDefinition, const Engine::InputCommand& input, const std::vector<Asset::Clip>& availableClips)
+    void ApplyStateEffects(entt::registry& registry, entt::entity entity, const Game::FighterState& state, const Game::CharacterDefinition& characterDefinition, const Engine::InputCommand& input, const std::vector<Asset::Clip>& availableClips, const Asset::Model& characterModel, bool forceShowAllHitboxes)
     {
         Engine::Transform& transform = registry.get<Engine::Transform>(entity);
         Engine::ClipPlayback& clipPlayback = registry.get<Engine::ClipPlayback>(entity);
@@ -102,8 +173,17 @@ namespace
         }
         else if (state.currentState == "Run")
         {
+            // Run is a committed forward dash, not conditional on the movement axis at all -
+            // holding just the Run button moves forward (matches this being a rushdown
+            // mechanic - see the design doc's "Run mechanic confirmed" note), and holding Back
+            // doesn't reverse it. A backward run (run_backward clip, imported but otherwise
+            // unused) was tried and dropped for now - the clip shows the character's back to the
+            // camera, which reads wrong for this side-view game; holding Back during Run
+            // currently has no distinct effect. Backlog idea (not MVP): a deliberate "retreat"
+            // mode using this same clip, gated behind a real gameplay cost (e.g. extra damage
+            // taken) rather than just re-adding it as a free direction toggle.
             clipName = "running";
-            moveUnitsPerSecond = characterDefinition.stats.runSpeed * input.axis;
+            moveUnitsPerSecond = characterDefinition.stats.runSpeed;
         }
         else if (state.currentState == "Jump")
         {
@@ -126,7 +206,10 @@ namespace
                 // yet).
                 for (const Game::MoveHitboxDef& hitboxDef : activeMove->hitboxes)
                 {
-                    if (state.framesInMove >= hitboxDef.frameStart && state.framesInMove < hitboxDef.frameEnd)
+                    // forceShowAllHitboxes bypasses the authored active-frame window (debug aid
+                    // only - see FighterUpdateInput's own comment), showing the box for the
+                    // state's whole duration so its bone-tracking can be watched continuously.
+                    if (forceShowAllHitboxes || (state.framesInMove >= hitboxDef.frameStart && state.framesInMove < hitboxDef.frameEnd))
                     {
                         activeHitbox = &hitboxDef;
                         break;
@@ -164,7 +247,11 @@ namespace
         if (activeHitbox != nullptr && activeMove != nullptr)
         {
             const int32_t moveIndex = characterDefinition.moveTable.IndexOf(activeMove->id);
-            registry.emplace_or_replace<Engine::Hitbox>(entity, Engine::Hitbox{ activeHitbox->box, static_cast<uint32_t>(moveIndex) });
+            Engine::CollisionBox worldBox = activeHitbox->box;
+            worldBox.offset = ResolveHitboxOffset(
+                *activeHitbox, characterDefinition, characterModel, availableClips, activeMove->animationClip, state.framesInState,
+                transform);
+            registry.emplace_or_replace<Engine::Hitbox>(entity, Engine::Hitbox{ worldBox, static_cast<uint32_t>(moveIndex) });
         }
         else if (registry.all_of<Engine::Hitbox>(entity))
         {
@@ -394,7 +481,9 @@ namespace Game
             }
         }
 
-        ApplyStateEffects(registry, entity, state, input.characterDefinition, input.thisTickInput, input.availableClips);
+        ApplyStateEffects(
+            registry, entity, state, input.characterDefinition, input.thisTickInput, input.availableClips, input.characterModel,
+            input.forceShowAllHitboxes);
 
         ++state.framesInState;
         if (state.currentState == "Attack")

@@ -11,6 +11,7 @@
 #include "Foundation/Debug.h"
 #include "Foundation/Log.h"
 #include "Foundation/Window.h"
+#include "Renderer/Buffer.h"
 #include "Renderer/DebugDrawPass.h"
 #include "Renderer/RenderTasks.h"
 #include "CombatDsl.h"
@@ -132,18 +133,33 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
         // something Engine's generic connective resource layer can detect or correct on its
         // own (a legitimately tiny model is indistinguishable from this from the geometry
         // alone) - a caller-known correction for this asset, per rootTransform's own contract.
-        // Composed with the entity's own Transform (applied second, so the asset-specific
-        // scale-fix always happens first regardless of where the entity is placed) - this is
-        // what makes moving Transform.position actually move the rendered character, not just
-        // add an inert component alongside the existing rendering path.
-        const DirectX::XMMATRIX characterAssetCorrection = DirectX::XMMatrixScaling(100.0f, 100.0f, 100.0f);
-        const DirectX::XMMATRIX characterRootTransform =
-            characterAssetCorrection * Engine::ComputeWorldMatrix(registry.get<Engine::Transform>(characterEntity));
-        characterDrawItems = Engine::CreateSkinnedMeshDrawItems(characterModel, kCharacterDirectory, characterRootTransform);
+        // Stored on characterDefinition (not just a local here) so both FighterState.cpp's
+        // bone-attached-hitbox lookup and the per-frame render update below (tick loop) read
+        // the exact same source rather than a second hand-copied constant.
+        DirectX::XMStoreFloat4x4(&characterDefinition.assetCorrection, DirectX::XMMatrixScaling(100.0f, 100.0f, 100.0f));
+        // This character's own source asset was authored facing along Z (front/back toward a
+        // camera positioned there), but every other system in this game (ground plane,
+        // movement, the default camera) already assumes a 2D side view - camera looking down
+        // +Z, X the screen-horizontal gameplay axis. Rotate 90 degrees so its profile faces
+        // that camera instead - see CharacterDefinition::facingCorrectionRadians's own comment
+        // for why this is a second, separate correction from assetCorrection above, not folded
+        // into it (and why it's applied per-frame below rather than baked into rootTransform
+        // here alongside assetCorrection).
+        characterDefinition.facingCorrectionRadians = DirectX::XM_PIDIV2;
+
+        // Only assetCorrection bakes into the vertex data here - the entity's own Transform is
+        // still {0,0,0}/identity at this point (nothing has moved yet), and facingCorrection is
+        // deliberately applied per-frame instead (see the render loop's own comment on why).
+        const DirectX::XMMATRIX assetCorrection = DirectX::XMLoadFloat4x4(&characterDefinition.assetCorrection);
+        characterDrawItems = Engine::CreateSkinnedMeshDrawItems(characterModel, kCharacterDirectory, assetCorrection);
         if (!characterDrawItems.empty())
         {
             registry.emplace<Engine::SkinnedRenderable>(characterEntity, Engine::SkinnedRenderable{ &characterDrawItems[0] });
         }
+
+        // One-time name->index resolution for every hitbox's optional bone attachment - needs
+        // the real imported model, so this is the earliest point it can run.
+        Game::ResolveHitboxJoints(characterModel, characterDefinition.moveTable);
     }
 
     // Resolved once, reused every frame below - the skinned mesh node's own skin (this asset
@@ -276,10 +292,14 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     // The free-fly camera's own gamepad move axis and the fighter's movement axis both read the
     // same physical left stick (Engine::GamepadAxis::LeftStickX) - moving the camera with a
     // gamepad inevitably also walks the character, which can walk it straight into the dev
-    // test-hitbox rig (or off the stage edge) while someone's just trying to look around. On by
-    // default is wrong (it would silently eat real gameplay input), so this stays off by
-    // default and is purely an opt-in navigation aid.
-    bool freezeCharacterMovement = false;
+    // test-hitbox rig (or off the stage edge) while someone's just trying to look around.
+    // Deliberately scoped to the analog stick only (Engine::AssembleInputCommand's
+    // ignoreGamepadAnalogAxis) - keyboard A/D and the D-pad (digital, not analog) still move the
+    // character while this is on, since the stick is the only source that actually conflicts
+    // with the camera. On by default - unlike a full input freeze, this doesn't cost any real
+    // gameplay input (D-pad/keyboard movement both still work), so there's no reason to make
+    // testing opt into it: stick drives the camera, D-pad drives the character, out of the box.
+    bool disableCharacterAnalogStickMovement = true;
 #endif
     // Fixed-timestep sim loop skeleton - no sim state exists yet to actually drive with this;
     // it proves ticks run at a fixed rate decoupled from render rate, and that a per-tick
@@ -299,6 +319,12 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     // and UpdateFighterState is skipped entirely for this entity so it can't fight back over the
     // manual selection. Off by default - real gameplay is game-driven, this is a testing aid.
     bool manualClipOverride = false;
+    // Debug aid: shows the active move's hitbox for the whole Attack state instead of gating it
+    // to the move's own authored active-frame window (often well under 200ms real-time) - lets a
+    // bone-attached hitbox's tracking be watched continuously via "Collision debug draw" rather
+    // than racing a blink-and-miss-it window. Never changes hit resolution itself. Off by
+    // default - see FighterUpdateInput's own comment.
+    bool forceShowAllHitboxes = false;
 
     // Data-driven, hot-reloaded (see the polling below) - MakeDefaultFighterBindings() is only
     // the fallback for a missing/malformed file, never itself edited to rebind anything anymore.
@@ -365,16 +391,15 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
         simClock.BeginFrame(deltaSeconds);
         while (simClock.TryConsumeTick())
         {
-            lastInputCommand = Engine::AssembleInputCommand(simClock.tickCount, fighterBindings, lastInputCommand, /*gamepadIndex*/ 0);
+            // See disableCharacterAnalogStickMovement's own declaration - unconditionally false
+            // outside dev tools, so this always compiles to the existing behavior there.
 #ifdef OMD_DEV_TOOLS
-            // See freezeCharacterMovement's own declaration - zeroed here, before push/use, so
-            // every downstream consumer (SelectMove, UpdateFighterState, InputHistory itself)
-            // consistently sees "no movement input" rather than each needing its own check.
-            if (freezeCharacterMovement)
-            {
-                lastInputCommand.axis = 0.0f;
-            }
+            const bool ignoreGamepadAnalogAxis = disableCharacterAnalogStickMovement;
+#else
+            const bool ignoreGamepadAnalogAxis = false;
 #endif
+            lastInputCommand = Engine::AssembleInputCommand(
+                simClock.tickCount, fighterBindings, lastInputCommand, /*gamepadIndex*/ 0, ignoreGamepadAnalogAxis);
             playerInputHistory.Push(lastInputCommand);
 
             // Debug readout only for now (Phase 3) - only overwritten on an actual selection
@@ -406,7 +431,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
                     registry, characterEntity,
                     Game::FighterUpdateInput{
                         lastInputCommand, playerInputHistory, lastCollisionEvents, sharedStates, characterDefinition,
-                        characterModel.clips });
+                        characterModel.clips, characterModel, forceShowAllHitboxes });
             }
 
             // Deterministic, fixed-tick per the networking-readiness design - resolved here, not
@@ -430,6 +455,28 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
         // "gameplay-affecting logic runs once per tick," not a bug.
         if (characterSkin != nullptr && !characterModel.clips.empty() && registry.all_of<Engine::SkinnedRenderable>(characterEntity))
         {
+            Renderer::SkinnedMeshDrawItem& characterDrawItem = *registry.get<Engine::SkinnedRenderable>(characterEntity).drawItem;
+
+            // World transform, recomputed and re-uploaded every frame - previously baked once at
+            // startup from Transform{0,0,0} and never touched again, a real bug: moving
+            // Transform.position (walk/run/jump) never actually moved the rendered mesh, only
+            // its pose/animation updated. assetCorrection (scale) is deliberately NOT reapplied
+            // here - it's already permanently baked into this draw item's vertex data (see the
+            // rootTransform passed to CreateSkinnedMeshDrawItems at setup, above); multiplying it
+            // in again here would double it every frame. facingCorrectionRadians (rotation) is
+            // NOT baked into vertex data the same way (kept out deliberately so it stays a single
+            // source of truth alongside the live Transform below, and to match FighterState.cpp's
+            // bone-attached hitbox lookup, which applies it the same way rather than assuming
+            // it's pre-baked).
+            {
+                const DirectX::XMMATRIX facingCorrection = DirectX::XMMatrixRotationY(characterDefinition.facingCorrectionRadians);
+                const DirectX::XMMATRIX worldTransform =
+                    facingCorrection * Engine::ComputeWorldMatrix(registry.get<Engine::Transform>(characterEntity));
+                DirectX::XMFLOAT4X4 worldForGpu;
+                DirectX::XMStoreFloat4x4(&worldForGpu, DirectX::XMMatrixTranspose(worldTransform));
+                Renderer::Buffer::Update(characterDrawItem.worldBuffer, &worldForGpu, sizeof(worldForGpu));
+            }
+
             Engine::ClipPlayback& characterPlayback = registry.get<Engine::ClipPlayback>(characterEntity);
             const Asset::Clip& clip = characterModel.clips[characterPlayback.clipIndex];
             // Manual override restores the pre-state-machine behavior for this entity only:
@@ -442,7 +489,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
             }
             Engine::UpdateSkinnedPose(
                 characterModel, *characterSkin, clip, characterPlayback.playbackTimeSeconds, DirectX::XMMatrixIdentity(),
-                DirectX::XMMatrixIdentity(), *registry.get<Engine::SkinnedRenderable>(characterEntity).drawItem);
+                DirectX::XMMatrixIdentity(), characterDrawItem);
         }
 
 #ifdef OMD_DEV_TOOLS
@@ -499,7 +546,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
             // active" mode switch, not a mouse-specific concern like this one).
             ImGui::SeparatorText("Camera");
             ImGui::Checkbox("Camera mouse control", &enableCameraMouseControl);
-            ImGui::Checkbox("Freeze character movement (gamepad camera nav)", &freezeCharacterMovement);
+            ImGui::Checkbox("Disable character movement through controller analog stick", &disableCharacterAnalogStickMovement);
 
             // Visualizes the fixed-tick loop and the InputCommand it produces, since nothing
             // else consumes either yet. One line per concern to stay compact in this
@@ -533,6 +580,10 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
                     "State: %s  Frame: %u  Health: %d/%d  X: %.2f  Y: %.2f", fighterState.currentState.c_str(), fighterState.framesInState,
                     health.current, health.max, fighterTransform.position.x, fighterTransform.position.y);
             }
+            // Combined with "Collision debug draw" above (RenderTasks' own toggle) - this alone
+            // draws nothing, it just widens WHEN a move's hitbox exists so there's something to
+            // see with that toggle on.
+            ImGui::Checkbox("Force show all hitboxes (whole Attack state, not just active frames)", &forceShowAllHitboxes);
 
             // Collision module test rig - see the entity setup above for why these two entities
             // exist. Enable "Collision debug draw" above to see the boxes; drag these to make
@@ -548,10 +599,11 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
         {
             camera = Engine::Camera{};
             enableCameraMouseControl = true;
-            freezeCharacterMovement = false;
+            disableCharacterAnalogStickMovement = true;
             enableCharacter = true;
             enableLocalTestScene = false;
             manualClipOverride = false;
+            forceShowAllHitboxes = false;
             registry.get<Engine::Transform>(testHitboxEntity).position.x = 2.0f;
             registry.get<Engine::Transform>(testTriggerEntity).position.x = -2.0f;
             // Also recovers the character's own fighter state/health - previously left out, which

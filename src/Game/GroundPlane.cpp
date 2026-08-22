@@ -32,8 +32,12 @@ namespace Game
         // reads as a real scale reference instead of an arbitrary stretch; UVs span [0, 1] once
         // across the whole plane (baked into the texture, not tiled via sampler wrap mode, so
         // this doesn't depend on whatever addressing mode the shared sampler happens to use).
+        // 64, not 8 - the original value produced a 96x24 texture (8px/tile) for the whole
+        // stage, visibly blurry up close since there just wasn't much texture detail to sample.
+        // Doesn't address shimmer/aliasing at a distance (this engine generates no mip chain for
+        // any texture yet - see the TODO(OM) on Texture::Create), only the up-close softness.
         constexpr float kTileWorldSize = 1.0f;
-        constexpr unsigned int kPixelsPerTile = 8;
+        constexpr unsigned int kPixelsPerTile = 64;
         const unsigned int tilesX = std::max(1u, static_cast<unsigned int>((kStageHalfWidth * 2.0f) / kTileWorldSize));
         const unsigned int tilesZ = std::max(1u, static_cast<unsigned int>((kStageHalfDepth * 2.0f) / kTileWorldSize));
         const unsigned int texWidth = tilesX * kPixelsPerTile;
