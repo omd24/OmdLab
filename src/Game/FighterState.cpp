@@ -20,6 +20,20 @@ namespace
     // to change jump feel.
     constexpr float kGravity = 3.0f;
 
+    // Total push-back distances, queued into FighterState::pushbackRemaining the tick HitStun
+    // is entered and eased out over the next several ticks (see kPushbackDecayPerTick below) -
+    // not applied as one instant displacement, which read as an unnatural teleport-style snap
+    // when first tried. Eyeball-tuned starting points, same "adjust the constant to change
+    // feel" precedent as kGravity above.
+    constexpr float kHitPushbackDistance = 0.35f;     // Defender, on a real (unblocked) hit.
+    constexpr float kBlockPushbackDistance = 0.45f;   // Defender, on block - a bit more than a hit, standard "pushblock" spacing incentive.
+    constexpr float kAttackerRecoilDistance = 0.1f;   // Attacker, same distance regardless of hit/block.
+    // Fraction of pushbackRemaining applied each tick - an ease-out (biggest step first,
+    // tapering toward zero), not a fixed-duration slide. At 60Hz this covers ~90% of the total
+    // distance within about 6 ticks (~100ms) - fast enough to read as a reaction to the hit,
+    // not a lingering slide.
+    constexpr float kPushbackDecayPerTick = 0.35f;
+
     int32_t FindClipIndex(const std::vector<Asset::Clip>& clips, const std::string& name)
     {
         for (size_t i = 0; i < clips.size(); ++i)
@@ -63,14 +77,26 @@ namespace
     // still added on top as a small world-axis-aligned refinement, not rotated into the joint's
     // own orientation - CollisionBox itself already ignores rotation everywhere else in this
     // system (see its own header comment), so this isn't a new inconsistency, just the same one.
+    // facingRight/baseFacingCorrectionRadians replace a plain CharacterDefinition reference so
+    // this reads the CURRENT tick's facing (which can flip mid-fight to face the opponent - see
+    // FighterState::facingRight's own comment) rather than a fixed per-character constant. When
+    // facing left, box.offset.x is also mirrored (in addition to baseFacingCorrectionRadians
+    // gaining +180 degrees below) - a hitbox's small authored "reach further out this way"
+    // refinement needs to point the mirrored direction too, or it would keep pushing toward the
+    // same absolute world side regardless of which way the character is actually turned.
     DirectX::XMFLOAT3 ResolveHitboxOffset(
-        const Game::MoveHitboxDef& hitboxDef, const Game::CharacterDefinition& characterDefinition, const Asset::Model& model,
+        const Game::MoveHitboxDef& hitboxDef, float baseFacingCorrectionRadians, bool facingRight, const Asset::Model& model,
         const std::vector<Asset::Clip>& availableClips, const std::string& clipName, uint32_t framesElapsed,
         const Engine::Transform& entityTransform)
     {
         if (hitboxDef.resolvedJointIndex < 0)
         {
-            return hitboxDef.box.offset;
+            DirectX::XMFLOAT3 offset = hitboxDef.box.offset;
+            if (!facingRight)
+            {
+                offset.x = -offset.x;
+            }
+            return offset;
         }
 
         const int32_t clipIndex = FindClipIndex(availableClips, clipName);
@@ -103,19 +129,22 @@ namespace
             Engine::EvaluateNodeWorldTransforms(model, DirectX::XMMatrixIdentity(), &clip, t);
         // facingCorrectionRadians (unlike assetCorrection's scale, just above) DOES apply here -
         // see its own comment on CharacterDefinition for why: it has to move the skeleton, or a
-        // hitbox would visibly detach from the mesh it's meant to track.
-        const DirectX::XMMATRIX facingCorrection = DirectX::XMMatrixRotationY(characterDefinition.facingCorrectionRadians);
+        // hitbox would visibly detach from the mesh it's meant to track. +180 degrees when
+        // facing left - see this function's own header comment.
+        const float effectiveFacingRadians = baseFacingCorrectionRadians + (facingRight ? 0.0f : DirectX::XM_PI);
+        const DirectX::XMMATRIX facingCorrection = DirectX::XMMatrixRotationY(effectiveFacingRadians);
         const DirectX::XMMATRIX jointToWorld = nodeWorldTransforms[static_cast<size_t>(hitboxDef.resolvedJointIndex)] * facingCorrection *
                                                 Engine::ComputeWorldMatrix(entityTransform);
         DirectX::XMFLOAT3 jointWorldPos;
         DirectX::XMStoreFloat3(&jointWorldPos, DirectX::XMVector3TransformCoord(DirectX::XMVectorZero(), jointToWorld));
 
+        const float mirroredOffsetX = facingRight ? hitboxDef.box.offset.x : -hitboxDef.box.offset.x;
         // Relative to the entity's own Transform.position - ComputeWorldAabb adds that back on
         // top at collision-test time, the same "offset is relative to the entity" contract a
         // root-relative hitbox already relies on, just computed from the joint's live position
         // instead of a fixed authored number.
         return DirectX::XMFLOAT3{
-            jointWorldPos.x - entityTransform.position.x + hitboxDef.box.offset.x,
+            jointWorldPos.x - entityTransform.position.x + mirroredOffsetX,
             jointWorldPos.y - entityTransform.position.y + hitboxDef.box.offset.y,
             jointWorldPos.z - entityTransform.position.z + hitboxDef.box.offset.z,
         };
@@ -249,8 +278,8 @@ namespace
             const int32_t moveIndex = characterDefinition.moveTable.IndexOf(activeMove->id);
             Engine::CollisionBox worldBox = activeHitbox->box;
             worldBox.offset = ResolveHitboxOffset(
-                *activeHitbox, characterDefinition, characterModel, availableClips, activeMove->animationClip, state.framesInState,
-                transform);
+                *activeHitbox, characterDefinition.facingCorrectionRadians, state.facingRight, characterModel, availableClips,
+                activeMove->animationClip, state.framesInState, transform);
             registry.emplace_or_replace<Engine::Hitbox>(entity, Engine::Hitbox{ worldBox, static_cast<uint32_t>(moveIndex) });
         }
         else if (registry.all_of<Engine::Hitbox>(entity))
@@ -306,11 +335,16 @@ namespace Game
         // FighterState.h) rather than assuming the attacker is any particular kind of entity.
         bool wasHitThisTick = false;
         const MoveDefinition* attackingMove = nullptr;
+        // Only ever read once attackingMove is non-null (see the HitStun-entry push-back below),
+        // which only happens once hit.attacker has already resolved a real MoveSource just below -
+        // always a valid, currently-registered entity by construction.
+        entt::entity attackingEntity = entt::null;
         for (const Engine::HitEvent& hit : input.lastCollisionEvents.hits)
         {
             if (hit.defender == entity)
             {
                 wasHitThisTick = true;
+                attackingEntity = hit.attacker;
                 if (const MoveSource* attackerMoveSource = registry.try_get<MoveSource>(hit.attacker))
                 {
                     if (attackerMoveSource->moveTable != nullptr &&
@@ -420,6 +454,27 @@ namespace Game
                         const bool wasBlocking =
                             previousState != "Run" && input.thisTickInput.buttons[static_cast<size_t>(FighterButton::Block)].held;
                         EnterState(state, input.characterDefinition, "");
+
+                        // Push-back - queues a total distance into pushbackRemaining, eased out
+                        // over the next several ticks (see UpdateFighterState's own comment),
+                        // rather than an instant displacement. Only applies if the attacker
+                        // entity is still around to read a position from (always true in
+                        // practice - see attackingEntity's own comment above).
+                        const Engine::Transform& defenderTransform = registry.get<Engine::Transform>(entity);
+                        if (const Engine::Transform* attackerTransform = registry.try_get<Engine::Transform>(attackingEntity))
+                        {
+                            // 1D gameplay axis (see GameConstants.h's own comment) - no vector
+                            // normalize needed. Direction = which side of the attacker the
+                            // defender is currently standing on.
+                            const float pushDir = (defenderTransform.position.x >= attackerTransform->position.x) ? 1.0f : -1.0f;
+                            const float defenderPushDistance = wasBlocking ? kBlockPushbackDistance : kHitPushbackDistance;
+                            state.pushbackRemaining = pushDir * defenderPushDistance;
+                            if (FighterState* attackerState = registry.try_get<FighterState>(attackingEntity))
+                            {
+                                attackerState->pushbackRemaining = -pushDir * kAttackerRecoilDistance;
+                            }
+                        }
+
                         if (wasBlocking)
                         {
                             state.stateDurationFrames = attackingMove->onBlockStunFrames;
@@ -478,6 +533,22 @@ namespace Game
                         break;
                     }
                 }
+            }
+        }
+
+        // Push-back ease-out - applied every tick regardless of current state (an attacker's own
+        // recoil should keep sliding out even after Attack's recovery ends, not just while the
+        // defender is in HitStun), before ApplyStateEffects so its own existing stage-bounds
+        // clamp covers the combined result of this plus whatever this tick's state moves.
+        if (state.pushbackRemaining != 0.0f)
+        {
+            Engine::Transform& pushbackTransform = registry.get<Engine::Transform>(entity);
+            const float step = state.pushbackRemaining * kPushbackDecayPerTick;
+            pushbackTransform.position.x += step;
+            state.pushbackRemaining -= step;
+            if (std::fabs(state.pushbackRemaining) < 0.001f)
+            {
+                state.pushbackRemaining = 0.0f;
             }
         }
 

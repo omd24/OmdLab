@@ -55,6 +55,22 @@ namespace Game
         // the arc, rather than read live from input the way Walk/Run compute their own
         // moveUnitsPerSecond - see jumpClip's own comment for why.
         float jumpHorizontalSpeed = 0.0f;
+        // Snap (not smoothly interpolated) visual facing - true faces the character's default
+        // orientation (CharacterDefinition::facingCorrectionRadians as authored), false adds a
+        // 180-degree flip on top of it. Set once per tick from outside UpdateFighterState (see
+        // main.cpp's own tick-loop comment), before either fighter's state machine runs, so both
+        // the render (main.cpp) and the bone-attached hitbox lookup (ResolveHitboxOffset) read
+        // the same value this tick - always faces the opponent, regardless of which way this
+        // fighter is currently walking/attacking, so crossups/jumping past an opponent don't
+        // leave anyone facing backward.
+        bool facingRight = true;
+        // Signed world-X distance still left to apply from a push-back impulse, eased out
+        // (a fraction applied per tick, decaying toward zero) rather than an instant teleport -
+        // see UpdateFighterState's own comment on why. Set once at the moment HitStun is
+        // entered (both for the defender being pushed and the attacker's own smaller recoil),
+        // untouched by EnterState so it keeps decaying independent of any state change that
+        // follows.
+        float pushbackRemaining = 0.0f;
     };
 
     struct Health

@@ -128,6 +128,15 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     constexpr const char* kCharacterDirectory = "data/characters/polyone_stick_man";
     Asset::Model characterModel;
     std::vector<Renderer::SkinnedMeshDrawItem> characterDrawItems;
+    // The dummy fighter's own definition - a separate CharacterDefinition, not aliased to the
+    // player's, since MoveSource::moveTable is a raw pointer into a CharacterDefinition's own
+    // moveTable address; sharing the player's would point the dummy's MoveSource at the
+    // player's real move table. moveTable is deliberately left empty (no moves.combat load) -
+    // that's the entire mechanism behind "no AI, never attacks": SelectMove over an empty table
+    // always returns nullopt, so Attack can never fire for this entity, with zero new branching
+    // anywhere else.
+    Game::CharacterDefinition dummyDefinition;
+    std::vector<Renderer::SkinnedMeshDrawItem> dummyDrawItems;
     if (Asset::ImportGltf("data/characters/polyone_stick_man/StickMan.glb", characterModel))
     {
         // Correction for this specific source file: Sketchfab's FBX-to-glTF conversion wraps
@@ -164,6 +173,17 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
         // One-time name->index resolution for every hitbox's optional bone attachment - needs
         // the real imported model, so this is the earliest point it can run.
         Game::ResolveHitboxJoints(characterModel, characterDefinition.moveTable);
+
+        // Dummy shares the player's own import quirks (same source asset) but gets its own
+        // CharacterDefinition instance (see its own declaration above) and its own GPU-backed
+        // draw item instance - CreateSkinnedMeshDrawItems's own persistent per-instance world/
+        // bone-palette buffers are exactly why a second real fighter needs a second call here,
+        // not a shared draw item (reusing one buffer across items was a real historical bug -
+        // see StaticMeshDrawItem's own comment).
+        dummyDefinition.stats = characterDefinition.stats;
+        dummyDefinition.assetCorrection = characterDefinition.assetCorrection;
+        dummyDefinition.facingCorrectionRadians = characterDefinition.facingCorrectionRadians;
+        dummyDrawItems = Engine::CreateSkinnedMeshDrawItems(characterModel, kCharacterDirectory, assetCorrection);
     }
 
     // Resolved once, reused every frame below - the skinned mesh node's own skin (this asset
@@ -224,33 +244,40 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
         characterEntity, Game::Health{ characterDefinition.stats.maxHealth, characterDefinition.stats.maxHealth });
     registry.emplace<Game::MoveSource>(characterEntity, Game::MoveSource{ &characterDefinition.moveTable });
 
+    // The dummy fighter - a real second entity (no AI, stands still, blocks only via a debug
+    // checkbox below) to test the player's real moveset against a real Hurtbox, replacing the
+    // old dev-only test-hitbox rig this same rig used to stand in for one. Real content, not
+    // dev-only (see rebuildDrawItems below), same "always included" precedent groundPlaneDrawItems
+    // already sets - so unlike the removed test rig, this is unconditional, not OMD_DEV_TOOLS-gated.
+    const entt::entity dummyEntity = registry.create();
+    registry.emplace<Engine::Transform>(dummyEntity, Engine::Transform{ { 2.0f, 0.0f, 0.0f } });
+    if (!dummyDrawItems.empty())
+    {
+        registry.emplace<Engine::SkinnedRenderable>(dummyEntity, Engine::SkinnedRenderable{ &dummyDrawItems[0] });
+    }
+    registry.emplace<Engine::ClipPlayback>(dummyEntity);
+    for (size_t i = 0; i < characterModel.clips.size(); ++i)
+    {
+        if (characterModel.clips[i].name == "idle")
+        {
+            registry.get<Engine::ClipPlayback>(dummyEntity).clipIndex = static_cast<int32_t>(i);
+            break;
+        }
+    }
+    registry.emplace<Engine::Hurtbox>(
+        dummyEntity, Engine::Hurtbox{ { Engine::CollisionBox{ { 0.0f, 0.9f, 0.0f }, { 0.35f, 0.9f, 0.25f } } } });
+    registry.emplace<Game::FighterState>(dummyEntity);
+    registry.emplace<Game::Health>(dummyEntity, Game::Health{ dummyDefinition.stats.maxHealth, dummyDefinition.stats.maxHealth });
+    // Never actually dereferenced (dummyDefinition.moveTable is always empty, so the dummy can
+    // never be a HitEvent's attacker) - kept only for uniform assembly with every other fighter.
+    registry.emplace<Game::MoveSource>(dummyEntity, Game::MoveSource{ &dummyDefinition.moveTable });
+
 #ifdef OMD_DEV_TOOLS
-    // Collision module test rig (no real per-move hitbox/state data exists yet - that arrives
-    // with the content and state-machine steps) - hand-placed volumes purely to prove
-    // Engine::ResolveCollisions/BuildCollisionDebugLines end to end. Positioned off to either
-    // side by default (no overlap with the character's hurtbox at rest); dragged via the
-    // "Debug" section's sliders below to make hit/trigger events fire live. Dev-only by
-    // construction (there's no non-debug reason for these entities to exist), so gated entirely
-    // rather than just hidden from a UI that also wouldn't exist.
-    const entt::entity testHitboxEntity = registry.create();
-    registry.emplace<Engine::Transform>(testHitboxEntity, Engine::Transform{ { 2.0f, 0.9f, 0.0f } });
-
-    // A tiny throwaway MoveTable so this dev-only "attacker" drives the same real hit-resolution
-    // path (damage/hitstun/block via MoveSource - see FighterState.h) a real fighter's hitbox
-    // would, instead of a bespoke test-only code path in FighterState.cpp. Declared here (not a
-    // temporary) so its address stays valid for MoveSource's raw pointer to reference for the
-    // rest of the program, same lifetime pattern as characterDefinition above.
-    Game::MoveTable devTestMoveTable;
-    devTestMoveTable.moves.push_back(Game::MoveDefinition{});
-    devTestMoveTable.moves[0].id = "dev_test_hit";
-    devTestMoveTable.moves[0].damage = 15;
-    devTestMoveTable.moves[0].onHitStunFrames = 20;
-    devTestMoveTable.moves[0].onBlockStunFrames = 10;
-    registry.emplace<Game::MoveSource>(testHitboxEntity, Game::MoveSource{ &devTestMoveTable });
-    registry.emplace<Engine::Hitbox>(
-        testHitboxEntity,
-        Engine::Hitbox{ Engine::CollisionBox{ {}, { 0.2f, 0.2f, 0.2f } }, static_cast<uint32_t>(devTestMoveTable.IndexOf("dev_test_hit")) });
-
+    // Collision module test rig - the hitbox half (a draggable ImGui-slider "attacker") is
+    // superseded by the dummy above and removed; this trigger volume stays, since nothing else
+    // in the game exercises TriggerVolume/trigger events yet. Dev-only by construction (there's
+    // no non-debug reason for this entity to exist), so gated entirely rather than just hidden
+    // from a UI that also wouldn't exist.
     const entt::entity testTriggerEntity = registry.create();
     registry.emplace<Engine::Transform>(testTriggerEntity, Engine::Transform{ { -2.0f, 0.9f, 0.0f } });
     registry.emplace<Engine::TriggerVolume>(
@@ -281,7 +308,15 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     bool enableCharacter = true;
     auto rebuildDrawItems = [&]()
     {
-        Renderer::SkinnedMeshPass::SetDrawItems(enableCharacter ? characterDrawItems : std::vector<Renderer::SkinnedMeshDrawItem>{});
+        // Dummy's own draw items are concatenated in unconditionally - real content, like the
+        // ground plane below, not gated behind enableCharacter (which stays player-only).
+        std::vector<Renderer::SkinnedMeshDrawItem> skinnedItems;
+        if (enableCharacter)
+        {
+            skinnedItems.insert(skinnedItems.end(), characterDrawItems.begin(), characterDrawItems.end());
+        }
+        skinnedItems.insert(skinnedItems.end(), dummyDrawItems.begin(), dummyDrawItems.end());
+        Renderer::SkinnedMeshPass::SetDrawItems(skinnedItems);
         std::vector<Renderer::StaticMeshDrawItem> staticItems = groundPlaneDrawItems;
 #ifdef OMD_DEV_TOOLS
         if (enableLocalTestScene)
@@ -294,6 +329,13 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     rebuildDrawItems();
 
     Engine::Camera camera;
+    // Camera follow toggle - unconditional (not just under OMD_DEV_TOOLS), since this free-fly
+    // camera is the only camera that exists at all right now (see Engine::Camera's own header
+    // comment - a real locked 2D-follow mode isn't built yet), so non-dev builds need this too,
+    // not just a debug convenience. Only its on/off checkbox (debugSectionUI below) is
+    // dev-tools-gated - same "unconditional bool, gated checkbox" pattern forceShowAllHitboxes/
+    // manualClipOverride/dummyBlocksHeld already use.
+    bool enableCameraFollow = true;
 #ifdef OMD_DEV_TOOLS
     // The free-fly camera is itself dev-only tooling (see Engine::Camera's own header comment -
     // no real fixed 2D game camera exists yet), so this toggle lives entirely under dev tools
@@ -330,6 +372,15 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     Engine::FixedTimestepAccumulator simClock;
     Engine::InputHistory playerInputHistory;
     Engine::InputCommand lastInputCommand;
+    // The dummy's synthetic per-tick input - axis and every button stay at their default
+    // (false/0) every tick except Block, driven by the "Dummy blocks" checkbox below.
+    // dummyBlocksHeld itself is declared unconditionally (not just under OMD_DEV_TOOLS) since
+    // the always-compiled tick loop below reads it every tick to build dummyInputCommand - same
+    // existing pattern forceShowAllHitboxes/manualClipOverride already use (only their checkbox
+    // is dev-tools-gated, not the underlying bool).
+    Engine::InputHistory dummyInputHistory;
+    Engine::InputCommand dummyInputCommand;
+    bool dummyBlocksHeld = false;
     // Latest tick's collision resolution - read by the debug draw list below between ticks, the
     // same "store the final answer" shape lastInputCommand already uses.
     Engine::CollisionEvents lastCollisionEvents;
@@ -434,12 +485,47 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
         const bool allowCameraKeyboard = true;
 #endif
         Engine::UpdateFreeFlyCamera(camera, window, deltaSeconds, allowCameraMouse, allowCameraKeyboard);
+        if (enableCameraFollow)
+        {
+            // A simple "invisible point at the midpoint of both fighters" follow - only X eases
+            // toward it each frame (this is a 2D-camera game; Z is purely the stage's visual
+            // depth - see GameConstants.h - and Jump's own Y arc is modest enough not to need
+            // vertical follow too). Height/depth/yaw/pitch are left untouched, so this coexists
+            // with manual free-fly adjustments (zoom/angle) instead of fighting them - only X
+            // gets overridden while this toggle is on.
+            const float playerX = registry.get<Engine::Transform>(characterEntity).position.x;
+            const float dummyX = registry.get<Engine::Transform>(dummyEntity).position.x;
+            const float midpointX = (playerX + dummyX) * 0.5f;
+            // Eyeball-tuned starting point (see FighterState.cpp's own precedent for this
+            // phrasing) - higher catches up to the midpoint faster. Not true frame-rate-
+            // independent exponential decay (would need std::exp, not worth pulling in <cmath>
+            // for), just a per-frame fraction of the remaining distance, clamped so a long
+            // frame hitch can't overshoot past the target. std::clamp, not std::min - Windows.h's
+            // own min/max macros (NOMINMAX isn't defined in this project) break a bare std::min.
+            constexpr float kCameraFollowSpeed = 5.0f;
+            const float followT = std::clamp(kCameraFollowSpeed * deltaSeconds, 0.0f, 1.0f);
+            camera.position.x += (midpointX - camera.position.x) * followT;
+        }
         const float aspectRatio = static_cast<float>(Renderer::Device::GetWidth()) / static_cast<float>(Renderer::Device::GetHeight());
         const DirectX::XMFLOAT4X4 viewProjection = Engine::ComputeViewProjection(camera, aspectRatio);
 
         simClock.BeginFrame(deltaSeconds);
         while (simClock.TryConsumeTick())
         {
+            // Facing - snap (not interpolated), computed once per tick from last tick's settled
+            // positions, before either fighter's state machine runs below, so both the render
+            // (updateFighterRender further down) and the bone-attached hitbox lookup
+            // (FighterState.cpp's ResolveHitboxOffset) read this same tick's value. Whichever
+            // fighter is more to the left faces right (toward the other) and vice versa - always
+            // facing the opponent regardless of which way either is currently walking/attacking,
+            // so crossups/jumping past an opponent don't leave anyone facing backward.
+            {
+                const float playerX = registry.get<Engine::Transform>(characterEntity).position.x;
+                const float dummyX = registry.get<Engine::Transform>(dummyEntity).position.x;
+                registry.get<Game::FighterState>(characterEntity).facingRight = playerX <= dummyX;
+                registry.get<Game::FighterState>(dummyEntity).facingRight = dummyX <= playerX;
+            }
+
             // See disableCharacterAnalogStickMovement's own declaration - unconditionally false
             // outside dev tools, so this always compiles to the existing behavior there.
 #ifdef OMD_DEV_TOOLS
@@ -513,6 +599,19 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
                         characterModel.clips, characterModel, forceShowAllHitboxes });
             }
 
+            // The dummy has neither a manual-override nor a hitbox-tuning mode, so it always
+            // runs through the real state machine, unconditionally, every tick - reacting to
+            // last tick's collision events (from real hurtbox overlap with the player's own
+            // Attack hitboxes) exactly like the player's own call above.
+            dummyInputCommand.tick = simClock.tickCount;
+            dummyInputCommand.buttons[static_cast<size_t>(Game::FighterButton::Block)].held = dummyBlocksHeld;
+            dummyInputHistory.Push(dummyInputCommand);
+            Game::UpdateFighterState(
+                registry, dummyEntity,
+                Game::FighterUpdateInput{
+                    dummyInputCommand, dummyInputHistory, lastCollisionEvents, sharedStates, dummyDefinition, characterModel.clips,
+                    characterModel, /*forceShowAllHitboxes*/ false });
+
             // Deterministic, fixed-tick per the networking-readiness design - resolved here, not
             // once per render frame, even though nothing yet moves entities per tick (the debug
             // sliders below move them at render rate instead, so overlap color can lag a tick
@@ -532,9 +631,19 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
         // one clock instead of drifting apart. This does mean the character's pose is now
         // 60Hz-stepped rather than smoothly wall-clock-interpolated - a deliberate consequence of
         // "gameplay-affecting logic runs once per tick," not a bug.
-        if (characterSkin != nullptr && !characterModel.clips.empty() && registry.all_of<Engine::SkinnedRenderable>(characterEntity))
+        //
+        // Shared between the player and the dummy - both are separate GPU-backed instances of
+        // the same imported asset (characterModel/characterSkin), differing only in their own
+        // Transform/ClipPlayback/draw item/facing correction. advanceManually is player-only
+        // (see manualClipOverride's own declaration) - false for the dummy, whose
+        // playbackTimeSeconds is always frame-count-driven by UpdateFighterState instead.
+        auto updateFighterRender = [&](entt::entity entity, float facingCorrectionRadians, bool advanceManually)
         {
-            Renderer::SkinnedMeshDrawItem& characterDrawItem = *registry.get<Engine::SkinnedRenderable>(characterEntity).drawItem;
+            if (characterSkin == nullptr || characterModel.clips.empty() || !registry.all_of<Engine::SkinnedRenderable>(entity))
+            {
+                return;
+            }
+            Renderer::SkinnedMeshDrawItem& drawItem = *registry.get<Engine::SkinnedRenderable>(entity).drawItem;
 
             // World transform, recomputed and re-uploaded every frame - previously baked once at
             // startup from Transform{0,0,0} and never touched again, a real bug: moving
@@ -548,28 +657,42 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
             // bone-attached hitbox lookup, which applies it the same way rather than assuming
             // it's pre-baked).
             {
-                const DirectX::XMMATRIX facingCorrection = DirectX::XMMatrixRotationY(characterDefinition.facingCorrectionRadians);
-                const DirectX::XMMATRIX worldTransform =
-                    facingCorrection * Engine::ComputeWorldMatrix(registry.get<Engine::Transform>(characterEntity));
+                const DirectX::XMMATRIX facingCorrection = DirectX::XMMatrixRotationY(facingCorrectionRadians);
+                const DirectX::XMMATRIX worldTransform = facingCorrection * Engine::ComputeWorldMatrix(registry.get<Engine::Transform>(entity));
                 DirectX::XMFLOAT4X4 worldForGpu;
                 DirectX::XMStoreFloat4x4(&worldForGpu, DirectX::XMMatrixTranspose(worldTransform));
-                Renderer::Buffer::Update(characterDrawItem.worldBuffer, &worldForGpu, sizeof(worldForGpu));
+                Renderer::Buffer::Update(drawItem.worldBuffer, &worldForGpu, sizeof(worldForGpu));
             }
 
-            Engine::ClipPlayback& characterPlayback = registry.get<Engine::ClipPlayback>(characterEntity);
-            const Asset::Clip& clip = characterModel.clips[characterPlayback.clipIndex];
+            Engine::ClipPlayback& playback = registry.get<Engine::ClipPlayback>(entity);
+            const Asset::Clip& clip = characterModel.clips[playback.clipIndex];
             // Manual override restores the pre-state-machine behavior for this entity only:
             // wall-clock Advance(), same as every other clip preview in this app - lets one clip
             // be eyeballed in isolation without the state machine (skipped above) setting
             // playbackTimeSeconds itself.
-            if (manualClipOverride)
+            if (advanceManually)
             {
-                characterPlayback.Advance(deltaSeconds, clip.durationSeconds);
+                playback.Advance(deltaSeconds, clip.durationSeconds);
             }
             Engine::UpdateSkinnedPose(
-                characterModel, *characterSkin, clip, characterPlayback.playbackTimeSeconds, DirectX::XMMatrixIdentity(),
-                DirectX::XMMatrixIdentity(), characterDrawItem);
-        }
+                characterModel, *characterSkin, clip, playback.playbackTimeSeconds, DirectX::XMMatrixIdentity(),
+                DirectX::XMMatrixIdentity(), drawItem);
+        };
+        // +180 degrees when facing left (see FighterState::facingRight's own comment) - same
+        // convention FighterState.cpp's ResolveHitboxOffset uses, so the rendered mesh and its
+        // bone-attached hitboxes always agree on which way this tick's facing actually points.
+        // NOTE: this assumes facingRight=true (no extra rotation) faces toward +X in world
+        // space, matching this asset's own unmirrored facingCorrectionRadians. If fighters turn
+        // out to face AWAY from each other instead of toward once run, the fix is a one-line
+        // sign flip - swap the "<=" comparisons in the facing block above (or equivalently swap
+        // which case gets the +XM_PI here and in ResolveHitboxOffset).
+        const float playerFacingRadians =
+            characterDefinition.facingCorrectionRadians +
+            (registry.get<Game::FighterState>(characterEntity).facingRight ? 0.0f : DirectX::XM_PI);
+        const float dummyFacingRadians =
+            dummyDefinition.facingCorrectionRadians + (registry.get<Game::FighterState>(dummyEntity).facingRight ? 0.0f : DirectX::XM_PI);
+        updateFighterRender(characterEntity, playerFacingRadians, manualClipOverride);
+        updateFighterRender(dummyEntity, dummyFacingRadians, /*advanceManually*/ false);
 
 #ifdef OMD_DEV_TOOLS
         // Rebuilt every render frame from the latest resolved tick's events (see above) - cheap
@@ -671,6 +794,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
             // camera's future fixed-2D-view toggle (not built yet - a future "which camera is
             // active" mode switch, not a mouse-specific concern like this one).
             ImGui::SeparatorText("Camera");
+            ImGui::Checkbox("Camera follows players", &enableCameraFollow);
             ImGui::Checkbox("Camera mouse control", &enableCameraMouseControl);
             // See allowCameraKeyboard above - same manual+automatic pattern as the mouse toggle,
             // just off by default (see enableCameraKeyboardControl's own declaration for why).
@@ -709,6 +833,21 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
                     "State: %s  Frame: %u  Health: %d/%d  X: %.2f  Y: %.2f", fighterState.currentState.c_str(), fighterState.framesInState,
                     health.current, health.max, fighterTransform.position.x, fighterTransform.position.y);
             }
+
+            // Dummy readout - same shape as the player's own above, since UpdateFighterState
+            // drives it through the identical generic state machine. Directly useful for
+            // confirming HitStun/block/KO/push-back actually landed on a real second entity.
+            ImGui::SeparatorText("Fighter (dummy)");
+            {
+                const Game::FighterState& dummyState = registry.get<Game::FighterState>(dummyEntity);
+                const Game::Health& dummyHealth = registry.get<Game::Health>(dummyEntity);
+                const Engine::Transform& dummyTransform = registry.get<Engine::Transform>(dummyEntity);
+                ImGui::Text(
+                    "State: %s  Frame: %u  Health: %d/%d  X: %.2f  Y: %.2f", dummyState.currentState.c_str(), dummyState.framesInState,
+                    dummyHealth.current, dummyHealth.max, dummyTransform.position.x, dummyTransform.position.y);
+            }
+            ImGui::Checkbox("Dummy blocks", &dummyBlocksHeld);
+
             // Combined with "Collision debug draw" above (RenderTasks' own toggle) - this alone
             // draws nothing, it just widens WHEN a move's hitbox exists so there's something to
             // see with that toggle on.
@@ -785,12 +924,11 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
                 }
             }
 
-            // Collision module test rig - see the entity setup above for why these two entities
-            // exist. Enable "Collision debug draw" above to see the boxes; drag these to make
-            // the test hitbox overlap the character's hurtbox (turns red, Hits count increases)
-            // or the test trigger overlap it (turns red, Triggers count increases).
+            // Collision module test rig - see the entity setup above for why this one entity
+            // still exists (the dummy above now covers hitbox testing). Enable "Collision debug
+            // draw" above to see the box; drag it to make the test trigger overlap a hurtbox
+            // (turns red, Triggers count increases).
             ImGui::SeparatorText("Collision (test rig)");
-            ImGui::SliderFloat("Test hitbox X", &registry.get<Engine::Transform>(testHitboxEntity).position.x, -3.0f, 3.0f);
             ImGui::SliderFloat("Test trigger X", &registry.get<Engine::Transform>(testTriggerEntity).position.x, -3.0f, 3.0f);
             ImGui::Text("Hits: %zu  Triggers: %zu", lastCollisionEvents.hits.size(), lastCollisionEvents.triggers.size());
         };
@@ -798,6 +936,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
         if (Renderer::RenderTasks::DoFrame(viewProjection, primaryContentUI, debugSectionUI))
         {
             camera = Engine::Camera{};
+            enableCameraFollow = true;
             enableCameraMouseControl = true;
             enableCameraKeyboardControl = false;
             disableCharacterAnalogStickMovement = true;
@@ -814,7 +953,6 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
             hitboxTuningFrameCounter = 0;
             hitboxTuningPaused = false;
             hitboxTuningSaveMessage.clear();
-            registry.get<Engine::Transform>(testHitboxEntity).position.x = 2.0f;
             registry.get<Engine::Transform>(testTriggerEntity).position.x = -2.0f;
             // Also recovers the character's own fighter state/health - previously left out, which
             // meant landing in KO (whether from real play or the test-hitbox slider above) had no
@@ -823,6 +961,12 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
             registry.replace<Game::FighterState>(characterEntity, Game::FighterState{});
             registry.replace<Game::Health>(
                 characterEntity, Game::Health{ characterDefinition.stats.maxHealth, characterDefinition.stats.maxHealth });
+            // Same recovery for the dummy - it can reach KO/HitStun exactly like the player can.
+            registry.get<Engine::Transform>(dummyEntity) = Engine::Transform{ { 2.0f, 0.0f, 0.0f } };
+            registry.replace<Game::FighterState>(dummyEntity, Game::FighterState{});
+            registry.replace<Game::Health>(
+                dummyEntity, Game::Health{ dummyDefinition.stats.maxHealth, dummyDefinition.stats.maxHealth });
+            dummyBlocksHeld = false;
             // Also drop the last-resolved hit(s) - UpdateFighterState reacts to lastCollisionEvents
             // one tick late (see its own comment on why), so without this a hitbox that was still
             // overlapping the instant Reset was clicked would land one more hit right after the
