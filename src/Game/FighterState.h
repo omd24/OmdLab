@@ -110,4 +110,20 @@ namespace Game
     // (movement, clip, hitbox - see FighterState.cpp's own comment on where that meaning lives).
     // entity must already carry FighterState, Health, Transform, and ClipPlayback components.
     void UpdateFighterState(entt::registry& registry, entt::entity entity, const FighterUpdateInput& input);
+
+    // Debug preview only (hitbox authoring/adjustment tooling): drives the entity's
+    // clip and one move's hitbox exactly as a real Attack would, from an externally-owned
+    // looping frame counter instead of the real per-tick FighterState machine - lets a hitbox's
+    // offset/half-extent be tuned live via ImGui sliders (main.cpp, which edits
+    // CharacterDefinition::moveTable in place) and watched against the move's own animated pose,
+    // without needing real input, a real Attack transition, or a target to hit. Never reads or
+    // writes the entity's own FighterState/Health components - the caller must not also call
+    // UpdateFighterState for the same entity on the same tick while this is active (see
+    // main.cpp's own hitboxTuningMoveIndex). Attaches a real Engine::Hitbox component, same as a
+    // real Attack always does, so it's visualized via the existing "Collision debug draw" toggle
+    // for free - no new debug-draw code needed.
+    void PreviewMoveHitbox(
+        entt::registry& registry, entt::entity entity, const CharacterDefinition& characterDefinition, const std::string& moveId,
+        uint32_t frameCounter, const std::vector<Asset::Clip>& availableClips, const Asset::Model& characterModel,
+        bool forceShowAllHitboxes);
 }

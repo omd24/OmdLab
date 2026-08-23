@@ -25,6 +25,7 @@
 #include <Windows.h>
 
 #include <DirectXMath.h>
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <entt.hpp>
@@ -97,9 +98,12 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     // CharacterDefinition actually drives character loading later in this same pass.
     Game::CharacterDefinition characterDefinition;
     characterDefinition.modelDirectory = "data/characters/polyone_stick_man";
+    // Named (not just a load-site literal) since the hitbox-tuning debug tool's "Save" button
+    // later needs the same path to write back to.
+    constexpr const char* kMovesFilePath = "data/characters/polyone_stick_man/moves.combat";
     {
         Game::CombatDsl::CombatFile movesFile;
-        const bool movesLoaded = Game::CombatDsl::LoadCombatFile("data/characters/polyone_stick_man/moves.combat", movesFile);
+        const bool movesLoaded = Game::CombatDsl::LoadCombatFile(kMovesFilePath, movesFile);
         OMD_ASSERT(movesLoaded, "Failed to load moves.combat");
         const bool built = Game::BuildMoveTable(std::move(movesFile), characterDefinition.moveTable);
         OMD_ASSERT(built, "Failed to build MoveTable from moves.combat");
@@ -184,6 +188,15 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     for (const Asset::Clip& clip : characterModel.clips)
     {
         characterClipNames.push_back(clip.name.c_str());
+    }
+    // Hitbox tuning debug-UI move combo contents - "None" first so index 0 means
+    // "tuning off" without needing a separate bool alongside hitboxTuningMoveIndex. Built once,
+    // same reasoning as characterClipNames above - MoveDefinition::displayName (defaults to the
+    // move's own id, see BuildMoveTable) doesn't change after load.
+    std::vector<const char*> hitboxTuningMoveNames{ "None" };
+    for (const Game::MoveDefinition& move : characterDefinition.moveTable.moves)
+    {
+        hitboxTuningMoveNames.push_back(move.displayName.c_str());
     }
 #endif
     // Default to "idle" by name, not clip index 0 - the export pipeline's clip order isn't
@@ -289,6 +302,15 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     // what's under the cursor," WantCaptureMouse covers the common case (dragging a slider or
     // clicking a checkbox) automatically, without needing to remember to flip this first.
     bool enableCameraMouseControl = true;
+    // Off by default, unlike the mouse toggle above - this camera's own W/S/A/D/Q/E and arrow
+    // keys collide with ImGui keyboard interaction (typing a number, using Left/Right to move
+    // the cursor inside a field, Ctrl+click-to-type on a slider) far more often than the mouse
+    // toggle's own click/drag case, and typing into a debug field is the more common workflow
+    // than flying the camera with the keyboard now that mouse-drag navigation exists (see
+    // UpdateFreeFlyCamera's own header comment). Combined with ImGui's own io.WantCaptureKeyboard
+    // below, the same "manual override + automatic ImGui-focus gate" pattern
+    // enableCameraMouseControl/io.WantCaptureMouse already established.
+    bool enableCameraKeyboardControl = false;
     // The free-fly camera's own gamepad move axis and the fighter's movement axis both read the
     // same physical left stick (Engine::GamepadAxis::LeftStickX) - moving the camera with a
     // gamepad inevitably also walks the character, which can walk it straight into the dev
@@ -325,6 +347,30 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     // than racing a blink-and-miss-it window. Never changes hit resolution itself. Off by
     // default - see FighterUpdateInput's own comment.
     bool forceShowAllHitboxes = false;
+    // Hitbox authoring/adjustment tooling. -1 means tuning is off (real gameplay owns
+    // the character normally, via UpdateFighterState below); otherwise indexes
+    // characterDefinition.moveTable.moves, and the tick loop calls Game::PreviewMoveHitbox
+    // instead of UpdateFighterState for this entity so the selected move's clip+hitbox loop
+    // continuously (via hitboxTuningFrameCounter) without needing real input or a target to hit.
+    // Takes priority over manualClipOverride if both are somehow on at once - simpler than
+    // cross-disabling the two checkboxes for a debug-only tool. The sliders in debugSectionUI
+    // below edit CharacterDefinition::moveTable in place (live, in memory) - a "Save" button next
+    // to them calls Game::SaveHitboxToFile to persist the currently-tuned box into moves.combat
+    // (a targeted text patch, not a full round-trip serializer - see that function's own comment)
+    // once satisfied; until clicked, edits are memory-only and lost on restart, same as before
+    // this button existed.
+    int hitboxTuningMoveIndex = -1;
+    int hitboxTuningBoxIndex = 0;
+    uint32_t hitboxTuningFrameCounter = 0;
+    // Feedback for the "Save" button below - set right after each click, cleared whenever the
+    // selected move/hitbox changes (a stale "Saved" from a previous box would be misleading).
+    std::string hitboxTuningSaveMessage;
+    // When true, the tick loop below stops auto-advancing hitboxTuningFrameCounter, leaving it
+    // exactly where the "Frame" slider (debugSectionUI) last set it - lets a specific keyframe be
+    // held still and the hitbox's offset/half-extent tuned against it, instead of fighting a
+    // continuously-looping preview. PreviewMoveHitbox itself is unaffected either way (it always
+    // just renders whatever hitboxTuningFrameCounter currently holds).
+    bool hitboxTuningPaused = false;
 
     // Data-driven, hot-reloaded (see the polling below) - MakeDefaultFighterBindings() is only
     // the fallback for a missing/malformed file, never itself edited to rebind anything anymore.
@@ -381,10 +427,13 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
         // other engine using this exact pattern to stop UI clicks/drags from also driving camera
         // controls underneath the window.
         const bool allowCameraMouse = enableCameraMouseControl && !ImGui::GetIO().WantCaptureMouse;
+        // Same pattern, keyboard half - see enableCameraKeyboardControl's own declaration.
+        const bool allowCameraKeyboard = enableCameraKeyboardControl && !ImGui::GetIO().WantCaptureKeyboard;
 #else
         const bool allowCameraMouse = true;
+        const bool allowCameraKeyboard = true;
 #endif
-        Engine::UpdateFreeFlyCamera(camera, window, deltaSeconds, allowCameraMouse);
+        Engine::UpdateFreeFlyCamera(camera, window, deltaSeconds, allowCameraMouse, allowCameraKeyboard);
         const float aspectRatio = static_cast<float>(Renderer::Device::GetWidth()) / static_cast<float>(Renderer::Device::GetHeight());
         const DirectX::XMFLOAT4X4 viewProjection = Engine::ComputeViewProjection(camera, aspectRatio);
 
@@ -420,12 +469,42 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
             // not stale ones. A hit is therefore detected and applied one tick after a hitbox
             // actually became active - imperceptible at 60Hz, the same kind of deliberate lag the
             // debug-slider-to-collision-color path already has.
-            // Skipped entirely while manualClipOverride is on (see the Clip dropdown below) so
-            // the state machine can't fight the manual clip selection - it would otherwise
-            // overwrite ClipPlayback right back to whatever Idle/Walk/etc. currently means every
-            // tick, which is exactly the "dropdown doesn't do anything" symptom this override
-            // exists to fix.
-            if (!manualClipOverride)
+            // Skipped entirely while manualClipOverride or hitbox tuning (see below) is on, so
+            // the state machine can't fight either debug override - it would otherwise overwrite
+            // ClipPlayback/Hitbox right back to whatever Idle/Walk/etc. currently means every
+            // tick, which is exactly the "dropdown doesn't do anything" symptom these overrides
+            // exist to fix.
+            const bool hitboxTuningActive =
+                hitboxTuningMoveIndex >= 0 && hitboxTuningMoveIndex < static_cast<int>(characterDefinition.moveTable.moves.size());
+            if (hitboxTuningActive)
+            {
+                // See hitboxTuningMoveIndex's own declaration - drives clip+hitbox from a
+                // continuously-looping frame counter instead of real input/collision, purely so
+                // the selected move's hitbox can be watched (and tuned) against its own animated
+                // pose. Loops back to frame 0 once the move's own authored duration elapses,
+                // matching how a real Attack's stateDurationFrames is computed (EnterState) -
+                // startup, active, and recovery all replay continuously rather than freezing at
+                // the end or racing off into fmodf's clip-only looping alone (which would desync
+                // the hitbox's own frameStart/frameEnd window from a clip that kept looping past
+                // it).
+                const Game::MoveDefinition& previewMove = characterDefinition.moveTable.moves[static_cast<size_t>(hitboxTuningMoveIndex)];
+                Game::PreviewMoveHitbox(
+                    registry, characterEntity, characterDefinition, previewMove.id, hitboxTuningFrameCounter, characterModel.clips,
+                    characterModel, forceShowAllHitboxes);
+                // Paused (see hitboxTuningPaused's own declaration) freezes the counter exactly
+                // where the "Frame" slider left it - the render above still uses whatever value
+                // that is, so the pose/hitbox visibly hold still at that keyframe.
+                if (!hitboxTuningPaused)
+                {
+                    const uint32_t previewTotalFrames = previewMove.startupFrames + previewMove.activeFrames + previewMove.recoveryFrames;
+                    ++hitboxTuningFrameCounter;
+                    if (previewTotalFrames > 0 && hitboxTuningFrameCounter >= previewTotalFrames)
+                    {
+                        hitboxTuningFrameCounter = 0;
+                    }
+                }
+            }
+            else if (!manualClipOverride)
             {
                 Game::UpdateFighterState(
                     registry, characterEntity,
@@ -496,7 +575,8 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
         // Rebuilt every render frame from the latest resolved tick's events (see above) - cheap
         // at this entity count. Purely feeds DebugDrawPass's visualization (itself dev-tools-
         // gated), so gated together rather than built and silently never rendered.
-        Renderer::DebugDrawPass::SetLines(Engine::BuildCollisionDebugLines(registry, lastCollisionEvents));
+        std::vector<Renderer::DebugDrawLine> debugLines = Engine::BuildCollisionDebugLines(registry, lastCollisionEvents);
+        Renderer::DebugDrawPass::SetLines(debugLines);
 #endif
 
 #ifdef OMD_DEV_TOOLS
@@ -535,6 +615,52 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
         };
         auto debugSectionUI = [&]()
         {
+            // On-screen orientation gizmo (top-right corner, Blender-style) - projects the
+            // world X/Y/Z axes through the free-fly camera's current rotation onto a small
+            // fixed screen-space widget with letter labels. Replaces the old world-space
+            // DebugDrawLine cross anchored at the character (unlabeled colored lines competing
+            // visually with real geometry, and only visible while "Collision debug draw" was
+            // also on). Drawn on the foreground draw list, which renders over all ImGui windows
+            // and 3D content regardless of window layout - not itself a window, and not gated
+            // behind any checkbox, since it's a navigation aid rather than a collision-debug
+            // artifact.
+            {
+                const Engine::CameraBasis basis = Engine::ComputeCameraBasis(camera);
+                const ImVec2 center(static_cast<float>(Renderer::Device::GetWidth()) - 70.0f, 70.0f);
+                constexpr float kRadius = 42.0f;
+
+                ImDrawList* foregroundDrawList = ImGui::GetForegroundDrawList();
+                foregroundDrawList->AddCircleFilled(center, kRadius + 16.0f, IM_COL32(20, 20, 20, 90));
+
+                struct AxisSpec
+                {
+                    DirectX::XMFLOAT3 worldDir;
+                    ImU32 color;
+                    const char* label;
+                };
+                static const AxisSpec kAxes[] = {
+                    { { 1.0f, 0.0f, 0.0f }, IM_COL32(230, 70, 70, 255), "X" },
+                    { { 0.0f, 1.0f, 0.0f }, IM_COL32(90, 210, 90, 255), "Y" },
+                    { { 0.0f, 0.0f, 1.0f }, IM_COL32(90, 150, 230, 255), "Z" },
+                };
+                for (const AxisSpec& axis : kAxes)
+                {
+                    const float screenRight = axis.worldDir.x * basis.right.x + axis.worldDir.y * basis.right.y +
+                        axis.worldDir.z * basis.right.z;
+                    // Screen Y grows downward, unlike world/camera up - negated so "up" in world
+                    // space draws upward on screen.
+                    const float screenUp = axis.worldDir.x * basis.up.x + axis.worldDir.y * basis.up.y + axis.worldDir.z * basis.up.z;
+                    const ImVec2 tip(center.x + screenRight * kRadius, center.y - screenUp * kRadius);
+                    foregroundDrawList->AddLine(center, tip, axis.color, 2.5f);
+                    foregroundDrawList->AddCircleFilled(tip, 4.0f, axis.color);
+                    const ImVec2 textSize = ImGui::CalcTextSize(axis.label);
+                    const ImVec2 labelPos(
+                        center.x + screenRight * (kRadius + 14.0f) - textSize.x * 0.5f,
+                        center.y - screenUp * (kRadius + 14.0f) - textSize.y * 0.5f);
+                    foregroundDrawList->AddText(labelPos, IM_COL32(255, 255, 255, 255), axis.label);
+                }
+            }
+
             if (ImGui::Checkbox("Local test scene", &enableLocalTestScene))
             {
                 rebuildDrawItems();
@@ -546,6 +672,9 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
             // active" mode switch, not a mouse-specific concern like this one).
             ImGui::SeparatorText("Camera");
             ImGui::Checkbox("Camera mouse control", &enableCameraMouseControl);
+            // See allowCameraKeyboard above - same manual+automatic pattern as the mouse toggle,
+            // just off by default (see enableCameraKeyboardControl's own declaration for why).
+            ImGui::Checkbox("Camera keyboard control", &enableCameraKeyboardControl);
             ImGui::Checkbox("Disable character movement through controller analog stick", &disableCharacterAnalogStickMovement);
 
             // Visualizes the fixed-tick loop and the InputCommand it produces, since nothing
@@ -585,6 +714,77 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
             // see with that toggle on.
             ImGui::Checkbox("Force show all hitboxes (whole Attack state, not just active frames)", &forceShowAllHitboxes);
 
+            // Hitbox authoring/adjustment tooling - see hitboxTuningMoveIndex's own
+            // declaration for how the tick loop uses this. "None" (index 0 here, -1 in
+            // hitboxTuningMoveIndex) hands the character back to real gameplay. Enable
+            // "Collision debug draw" above to actually see the box while tuning.
+            ImGui::SeparatorText("Hitbox tuning");
+            {
+                int hitboxTuningComboIndex = hitboxTuningMoveIndex + 1;
+                if (ImGui::Combo(
+                        "Move", &hitboxTuningComboIndex, hitboxTuningMoveNames.data(), static_cast<int>(hitboxTuningMoveNames.size())))
+                {
+                    hitboxTuningMoveIndex = hitboxTuningComboIndex - 1;
+                    hitboxTuningFrameCounter = 0;
+                    hitboxTuningBoxIndex = 0;
+                    hitboxTuningSaveMessage.clear();
+                }
+                if (hitboxTuningMoveIndex >= 0 && hitboxTuningMoveIndex < static_cast<int>(characterDefinition.moveTable.moves.size()))
+                {
+                    Game::MoveDefinition& previewMove = characterDefinition.moveTable.moves[static_cast<size_t>(hitboxTuningMoveIndex)];
+
+                    // A continuously-looping preview is hard to tune against - hold a specific
+                    // keyframe still (Pause) and scrub to it directly (Frame) instead of chasing
+                    // a moving target. The slider only accepts input while paused (BeginDisabled
+                    // below) - unpaused, the tick loop's own auto-advance would just immediately
+                    // overwrite a drag.
+                    ImGui::Checkbox("Pause", &hitboxTuningPaused);
+                    const uint32_t previewTotalFrames = previewMove.startupFrames + previewMove.activeFrames + previewMove.recoveryFrames;
+                    int hitboxTuningFrameSlider = static_cast<int>(hitboxTuningFrameCounter);
+                    ImGui::BeginDisabled(!hitboxTuningPaused);
+                    if (ImGui::SliderInt(
+                            "Frame", &hitboxTuningFrameSlider, 0, static_cast<int>(previewTotalFrames > 0 ? previewTotalFrames - 1 : 0)))
+                    {
+                        hitboxTuningFrameCounter = static_cast<uint32_t>(hitboxTuningFrameSlider);
+                    }
+                    ImGui::EndDisabled();
+                    ImGui::Text(
+                        "startup=%u active=%u recovery=%u", previewMove.startupFrames, previewMove.activeFrames,
+                        previewMove.recoveryFrames);
+
+                    if (previewMove.hitboxes.empty())
+                    {
+                        ImGui::TextDisabled("Selected move has no hitboxes");
+                    }
+                    else
+                    {
+                        // Only shown once a move actually has more than one hitbox (none do
+                        // today) - no point cluttering the common single-hitbox case with a
+                        // slider that only ever reads 0.
+                        if (previewMove.hitboxes.size() > 1)
+                        {
+                            ImGui::SliderInt(
+                                "Hitbox index", &hitboxTuningBoxIndex, 0, static_cast<int>(previewMove.hitboxes.size()) - 1);
+                            hitboxTuningSaveMessage.clear();
+                        }
+                        hitboxTuningBoxIndex = std::clamp(hitboxTuningBoxIndex, 0, static_cast<int>(previewMove.hitboxes.size()) - 1);
+                        Engine::CollisionBox& box = previewMove.hitboxes[static_cast<size_t>(hitboxTuningBoxIndex)].box;
+                        ImGui::SliderFloat3("Offset", &box.offset.x, -1.0f, 1.0f, "%.3f");
+                        ImGui::SliderFloat3("Half-extents", &box.halfExtents.x, 0.05f, 1.5f, "%.3f");
+                        if (ImGui::Button("Save to moves.combat"))
+                        {
+                            const bool saved = Game::SaveHitboxToFile(kMovesFilePath, previewMove.id, hitboxTuningBoxIndex, box);
+                            hitboxTuningSaveMessage = saved ? "Saved." : "Save failed - see logs/omdlab.log.";
+                        }
+                        if (!hitboxTuningSaveMessage.empty())
+                        {
+                            ImGui::SameLine();
+                            ImGui::TextDisabled("%s", hitboxTuningSaveMessage.c_str());
+                        }
+                    }
+                }
+            }
+
             // Collision module test rig - see the entity setup above for why these two entities
             // exist. Enable "Collision debug draw" above to see the boxes; drag these to make
             // the test hitbox overlap the character's hurtbox (turns red, Hits count increases)
@@ -599,11 +799,21 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
         {
             camera = Engine::Camera{};
             enableCameraMouseControl = true;
+            enableCameraKeyboardControl = false;
             disableCharacterAnalogStickMovement = true;
             enableCharacter = true;
             enableLocalTestScene = false;
             manualClipOverride = false;
             forceShowAllHitboxes = false;
+            // Does NOT revert any in-memory hitbox edits made via the tuning sliders above -
+            // only turns tuning off and hands the character back to real gameplay, same "no
+            // write-back, no undo either" scope the tool itself deliberately keeps (see
+            // hitboxTuningMoveIndex's own declaration).
+            hitboxTuningMoveIndex = -1;
+            hitboxTuningBoxIndex = 0;
+            hitboxTuningFrameCounter = 0;
+            hitboxTuningPaused = false;
+            hitboxTuningSaveMessage.clear();
             registry.get<Engine::Transform>(testHitboxEntity).position.x = 2.0f;
             registry.get<Engine::Transform>(testTriggerEntity).position.x = -2.0f;
             // Also recovers the character's own fighter state/health - previously left out, which

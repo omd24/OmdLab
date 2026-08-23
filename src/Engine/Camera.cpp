@@ -14,7 +14,7 @@ namespace
 
 namespace Engine
 {
-    void UpdateFreeFlyCamera(Camera& camera, HWND window, float deltaSeconds, bool allowMouseControl)
+    void UpdateFreeFlyCamera(Camera& camera, HWND window, float deltaSeconds, bool allowMouseControl, bool allowKeyboardControl)
     {
         if (GetForegroundWindow() != window)
         {
@@ -24,19 +24,19 @@ namespace Engine
         constexpr float moveUnitsPerSecond = 3.0f;
         constexpr float turnRadiansPerSecond = 1.5f;
 
-        if (Foundation::IsKeyDown(VK_LEFT))
+        if (allowKeyboardControl && Foundation::IsKeyDown(VK_LEFT))
         {
             camera.yaw -= turnRadiansPerSecond * deltaSeconds;
         }
-        if (Foundation::IsKeyDown(VK_RIGHT))
+        if (allowKeyboardControl && Foundation::IsKeyDown(VK_RIGHT))
         {
             camera.yaw += turnRadiansPerSecond * deltaSeconds;
         }
-        if (Foundation::IsKeyDown(VK_UP))
+        if (allowKeyboardControl && Foundation::IsKeyDown(VK_UP))
         {
             camera.pitch += turnRadiansPerSecond * deltaSeconds;
         }
-        if (Foundation::IsKeyDown(VK_DOWN))
+        if (allowKeyboardControl && Foundation::IsKeyDown(VK_DOWN))
         {
             camera.pitch -= turnRadiansPerSecond * deltaSeconds;
         }
@@ -63,27 +63,27 @@ namespace Engine
 
         const float moveStep = moveUnitsPerSecond * deltaSeconds;
         DirectX::XMVECTOR eye = DirectX::XMLoadFloat3(&camera.position);
-        if (Foundation::IsKeyDown('W'))
+        if (allowKeyboardControl && Foundation::IsKeyDown('W'))
         {
             eye = DirectX::XMVectorAdd(eye, DirectX::XMVectorScale(forward, moveStep));
         }
-        if (Foundation::IsKeyDown('S'))
+        if (allowKeyboardControl && Foundation::IsKeyDown('S'))
         {
             eye = DirectX::XMVectorSubtract(eye, DirectX::XMVectorScale(forward, moveStep));
         }
-        if (Foundation::IsKeyDown('D'))
+        if (allowKeyboardControl && Foundation::IsKeyDown('D'))
         {
             eye = DirectX::XMVectorAdd(eye, DirectX::XMVectorScale(right, moveStep));
         }
-        if (Foundation::IsKeyDown('A'))
+        if (allowKeyboardControl && Foundation::IsKeyDown('A'))
         {
             eye = DirectX::XMVectorSubtract(eye, DirectX::XMVectorScale(right, moveStep));
         }
-        if (Foundation::IsKeyDown('Q'))
+        if (allowKeyboardControl && Foundation::IsKeyDown('Q'))
         {
             eye = DirectX::XMVectorAdd(eye, DirectX::XMVectorScale(up, moveStep));
         }
-        if (Foundation::IsKeyDown('E'))
+        if (allowKeyboardControl && Foundation::IsKeyDown('E'))
         {
             eye = DirectX::XMVectorSubtract(eye, DirectX::XMVectorScale(up, moveStep));
         }
@@ -192,5 +192,24 @@ namespace Engine
         XMFLOAT4X4 viewProjection;
         XMStoreFloat4x4(&viewProjection, XMMatrixTranspose(XMMatrixMultiply(view, projection)));
         return viewProjection;
+    }
+
+    CameraBasis ComputeCameraBasis(const Camera& camera)
+    {
+        using namespace DirectX;
+
+        const XMVECTOR forward = ComputeForward(camera.yaw, camera.pitch);
+        const XMVECTOR worldUp = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
+        // Same right/up derivation UpdateFreeFlyCamera/ComputeViewProjection's XMMatrixLookToLH
+        // already use internally - kept consistent so this basis matches what's actually on
+        // screen, not a second, independently-derived convention.
+        const XMVECTOR right = XMVector3Normalize(XMVector3Cross(worldUp, forward));
+        const XMVECTOR up = XMVector3Cross(forward, right);
+
+        CameraBasis basis;
+        XMStoreFloat3(&basis.right, right);
+        XMStoreFloat3(&basis.up, up);
+        XMStoreFloat3(&basis.forward, forward);
+        return basis;
     }
 }

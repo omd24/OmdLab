@@ -52,9 +52,27 @@ namespace Engine
     // still work) - lets a caller with its own mouse-driven UI (ImGui) stop clicks/drags on that
     // UI from also dragging the camera, without losing keyboard control. Defaults true so
     // existing callers are unaffected.
-    void UpdateFreeFlyCamera(Camera& camera, HWND window, float deltaSeconds, bool allowMouseControl = true);
+    //
+    // allowKeyboardControl: false suppresses only the keyboard section above (W/S/A/D/Q/E and
+    // the arrow keys) - mouse/gamepad still work. Exists for the same reason allowMouseControl
+    // does: this camera's own keys collide with ImGui text/slider fields (e.g. Left/Right arrow
+    // moving the cursor within a numeric input, or Ctrl+click-to-type on a slider), which
+    // otherwise also pans/turns the camera underneath the field being edited. Defaults true so
+    // existing callers are unaffected.
+    void UpdateFreeFlyCamera(Camera& camera, HWND window, float deltaSeconds, bool allowMouseControl = true, bool allowKeyboardControl = true);
 
     // Combined view * projection matrix, transposed for the row_major cbuffer convention every
     // shader in this project declares (see Triangle.hlsl/LitTextured.hlsl).
     DirectX::XMFLOAT4X4 ComputeViewProjection(const Camera& camera, float aspectRatio);
+
+    // Camera-space (rotation-only, ignoring position/FOV/aspect) basis vectors - lets a caller
+    // project world-space directions onto screen space (e.g. a fixed on-screen orientation
+    // gizmo) without needing the full view/projection matrix ComputeViewProjection() produces.
+    struct CameraBasis
+    {
+        DirectX::XMFLOAT3 right;
+        DirectX::XMFLOAT3 up;
+        DirectX::XMFLOAT3 forward;
+    };
+    CameraBasis ComputeCameraBasis(const Camera& camera);
 }

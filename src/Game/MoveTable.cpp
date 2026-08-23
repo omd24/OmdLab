@@ -3,11 +3,51 @@
 #include "Asset/Model.h"
 #include "Foundation/Log.h"
 
+#include <cstdio>
+#include <fstream>
 #include <utility>
 
 namespace
 {
     using Foundation::Log::Severity;
+
+    std::string TrimCombatLine(const std::string& text)
+    {
+        const size_t start = text.find_first_not_of(" \t\r\n");
+        if (start == std::string::npos)
+        {
+            return "";
+        }
+        const size_t end = text.find_last_not_of(" \t\r\n");
+        return text.substr(start, end - start + 1);
+    }
+
+    std::string StripCombatComment(const std::string& line)
+    {
+        const size_t hashPos = line.find('#');
+        return hashPos == std::string::npos ? line : line.substr(0, hashPos);
+    }
+
+    // Formats a float the way this project's hand-authored .combat files already do - a bare
+    // integer when the value has no fractional part ("0", "8"), otherwise up to 4 decimal places
+    // with trailing zeros (and a bare trailing '.') trimmed ("0.15").
+    std::string FormatCombatNumber(float value)
+    {
+        char buffer[64];
+        std::snprintf(buffer, sizeof(buffer), "%.4f", value);
+        std::string text = buffer;
+        const size_t dot = text.find('.');
+        if (dot != std::string::npos)
+        {
+            size_t lastSignificant = text.find_last_not_of('0');
+            if (lastSignificant == dot)
+            {
+                --lastSignificant; // Nothing but zeros after the dot - drop the dot too.
+            }
+            text.erase(lastSignificant + 1);
+        }
+        return text == "-0" ? "0" : text;
+    }
 
     Game::GuardHeight ParseGuardHeight(const std::string& text)
     {
@@ -143,5 +183,168 @@ namespace Game
                 }
             }
         }
+    }
+
+    bool SaveHitboxToFile(const std::string& filePath, const std::string& moveId, int32_t hitboxIndex, const Engine::CollisionBox& box)
+    {
+        // Binary mode on both ends, deliberately - this project's .combat files are LF-only
+        // (confirmed on moves.combat itself), but the default text-mode ofstream on Windows
+        // translates every '\n' this function writes into '\r\n', silently rewriting every
+        // line's ending (not just the six target lines) to CRLF. Reading in binary mode instead
+        // (and trimming a stray '\r' below, for a CRLF-authored file this hasn't hit yet but
+        // could) plus writing in binary mode keeps the file's own existing line-ending
+        // convention untouched either way.
+        std::ifstream in(filePath, std::ios::binary);
+        if (!in.is_open())
+        {
+            Foundation::Log::Write(Severity::Error, "MoveTable", "SaveHitboxToFile: failed to open '%s' for reading", filePath.c_str());
+            return false;
+        }
+        std::vector<std::string> lines;
+        {
+            std::string line;
+            while (std::getline(in, line))
+            {
+                if (!line.empty() && line.back() == '\r')
+                {
+                    line.pop_back();
+                }
+                lines.push_back(line);
+            }
+        }
+        in.close();
+
+        int depth = 0;
+        bool inTargetMove = false;
+        bool enteredMoveBody = false;
+        int moveHeaderDepth = 0;
+        int32_t hitboxCounter = -1;
+        bool inTargetHitbox = false;
+        bool enteredHitboxBody = false;
+        int hitboxHeaderDepth = 0;
+        const std::string moveHeaderText = "move " + moveId;
+
+        struct FieldTarget
+        {
+            const char* name;
+            float value;
+            bool written;
+        };
+        FieldTarget targets[6] = {
+            { "offsetX", box.offset.x, false }, { "offsetY", box.offset.y, false }, { "offsetZ", box.offset.z, false },
+            { "halfX", box.halfExtents.x, false }, { "halfY", box.halfExtents.y, false }, { "halfZ", box.halfExtents.z, false },
+        };
+
+        for (size_t i = 0; i < lines.size(); ++i)
+        {
+            const std::string stripped = StripCombatComment(lines[i]);
+            const std::string trimmed = TrimCombatLine(stripped);
+            const int depthBefore = depth;
+
+            if (!inTargetMove && depthBefore == 0 && trimmed == moveHeaderText)
+            {
+                inTargetMove = true;
+                moveHeaderDepth = depthBefore;
+            }
+            else if (inTargetMove && !inTargetHitbox && depthBefore == moveHeaderDepth + 1 && trimmed == "hitbox")
+            {
+                ++hitboxCounter;
+                if (hitboxCounter == hitboxIndex)
+                {
+                    inTargetHitbox = true;
+                    hitboxHeaderDepth = depthBefore;
+                }
+            }
+            else if (inTargetHitbox && depthBefore == hitboxHeaderDepth + 1)
+            {
+                const size_t firstNonSpace = lines[i].find_first_not_of(" \t");
+                if (firstNonSpace != std::string::npos)
+                {
+                    const size_t tokenEnd = trimmed.find_first_of(" \t");
+                    const std::string fieldName = tokenEnd == std::string::npos ? trimmed : trimmed.substr(0, tokenEnd);
+                    for (FieldTarget& target : targets)
+                    {
+                        if (!target.written && fieldName == target.name)
+                        {
+                            const std::string indent = lines[i].substr(0, firstNonSpace);
+                            lines[i] = indent + target.name + " " + FormatCombatNumber(target.value);
+                            target.written = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            for (const char c : stripped)
+            {
+                if (c == '{') ++depth;
+                else if (c == '}') --depth;
+            }
+
+            if (inTargetMove)
+            {
+                if (depth > moveHeaderDepth)
+                {
+                    enteredMoveBody = true;
+                }
+                else if (enteredMoveBody && depth == moveHeaderDepth)
+                {
+                    inTargetMove = false;
+                }
+            }
+            if (inTargetHitbox)
+            {
+                if (depth > hitboxHeaderDepth)
+                {
+                    enteredHitboxBody = true;
+                }
+                else if (enteredHitboxBody && depth == hitboxHeaderDepth)
+                {
+                    break; // Target hitbox's own body is closed - nothing left to find.
+                }
+            }
+        }
+
+        if (hitboxCounter < hitboxIndex)
+        {
+            Foundation::Log::Write(
+                Severity::Error, "MoveTable", "SaveHitboxToFile: move '%s' has no hitbox #%d (found %d) in '%s'", moveId.c_str(),
+                hitboxIndex, hitboxCounter + 1, filePath.c_str());
+            return false;
+        }
+        bool allWritten = true;
+        for (const FieldTarget& target : targets)
+        {
+            if (!target.written)
+            {
+                Foundation::Log::Write(
+                    Severity::Error, "MoveTable", "SaveHitboxToFile: move '%s' hitbox #%d has no '%s' field line to rewrite in '%s'",
+                    moveId.c_str(), hitboxIndex, target.name, filePath.c_str());
+                allWritten = false;
+            }
+        }
+        if (!allWritten)
+        {
+            return false;
+        }
+
+        std::ofstream out(filePath, std::ios::binary | std::ios::trunc);
+        if (!out.is_open())
+        {
+            Foundation::Log::Write(Severity::Error, "MoveTable", "SaveHitboxToFile: failed to open '%s' for writing", filePath.c_str());
+            return false;
+        }
+        // Every line gets its own trailing '\n', including the last - matches moves.combat's own
+        // existing trailing-newline-at-EOF convention rather than dropping it.
+        for (const std::string& outLine : lines)
+        {
+            out << outLine << "\n";
+        }
+        out.close();
+
+        Foundation::Log::Write(
+            Severity::Info, "MoveTable", "SaveHitboxToFile: saved hitbox #%d of move '%s' to '%s'", hitboxIndex, moveId.c_str(),
+            filePath.c_str());
+        return true;
     }
 }

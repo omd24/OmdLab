@@ -137,4 +137,19 @@ namespace Game
     // resolvedJointIndex at -1 - FighterState.cpp treats that identically to "no bone was ever
     // authored," so a typo degrades to the old root-relative behavior rather than crashing.
     void ResolveHitboxJoints(const Asset::Model& model, MoveTable& moveTable);
+
+    // Targeted text patch for the hitbox-tuning debug tool's "Save" button - rewrites just the
+    // six numeric offsetX/offsetY/offsetZ/halfX/halfY/halfZ field lines of one hitbox block
+    // (identified by moveId + its position among that move's own hitbox{} blocks), leaving every
+    // other line - comments, other fields, formatting - byte-for-byte untouched. Deliberately NOT
+    // a general CombatDsl serializer: regenerating the whole file from the parsed AST would lose
+    // every hand-authored comment doing so (moves.combat's own header is exactly the kind of
+    // content this must never destroy - see the project's standing "no gitignoring/no destroying
+    // authored content" convention). Uses simple line-based brace-depth scanning, not a real
+    // parse - relies on this project's own authored style (each "move"/"hitbox" keyword's body
+    // opening "{" can be on the same or the next line; a field's value is whatever follows its
+    // name on that same line, comment-stripped). Returns false (logs why, never touches the file)
+    // if the move, the Nth hitbox, or any of the six field lines can't be found - a save must
+    // never silently do nothing or partially apply.
+    bool SaveHitboxToFile(const std::string& filePath, const std::string& moveId, int32_t hitboxIndex, const Engine::CollisionBox& box);
 }

@@ -491,4 +491,23 @@ namespace Game
             ++state.framesInMove;
         }
     }
+
+    void PreviewMoveHitbox(
+        entt::registry& registry, entt::entity entity, const CharacterDefinition& characterDefinition, const std::string& moveId,
+        uint32_t frameCounter, const std::vector<Asset::Clip>& availableClips, const Asset::Model& characterModel,
+        bool forceShowAllHitboxes)
+    {
+        // A throwaway, never-stored FighterState - ApplyStateEffects only reads the fields it's
+        // given, so this reuses its exact "Attack" branch (clip selection, hitbox attach) without
+        // needing a second copy of that logic here, and without touching the entity's real
+        // FighterState component at all.
+        FighterState previewState;
+        previewState.currentState = "Attack";
+        previewState.activeMoveId = moveId;
+        previewState.framesInState = frameCounter;
+        previewState.framesInMove = frameCounter;
+        ApplyStateEffects(
+            registry, entity, previewState, characterDefinition, Engine::InputCommand{}, availableClips, characterModel,
+            forceShowAllHitboxes);
+    }
 }
