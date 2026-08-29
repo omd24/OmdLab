@@ -15,7 +15,9 @@
 #include "Renderer/DebugDrawPass.h"
 #include "Renderer/RenderTasks.h"
 #include "CombatDsl.h"
+#include "FighterShadow.h"
 #include "FighterState.h"
+#include "GameConstants.h"
 #include "GroundPlane.h"
 #include "InputBindings.h"
 #include "LocalTestScene.h"
@@ -184,6 +186,35 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
         dummyDefinition.assetCorrection = characterDefinition.assetCorrection;
         dummyDefinition.facingCorrectionRadians = characterDefinition.facingCorrectionRadians;
         dummyDrawItems = Engine::CreateSkinnedMeshDrawItems(characterModel, kCharacterDirectory, assetCorrection);
+
+        // One hardcoded "punish" move for the "Block then punish" AI preset (debugSectionUI/
+        // tick loop below) - not authored in a .combat file, same "construct a MoveDefinition
+        // directly in code" precedent the old dev-test-hitbox rig used. Frame data/damage/
+        // hitboxes are copied from the player's own already-tuned/already-resolved "punch"
+        // (MoveDefinition itself is move-only - Cancel holds a unique_ptr - so only the
+        // copyable fields are taken, not the whole struct; hitboxes are separately copyable and
+        // already carry a resolved bone-joint index from ResolveHitboxJoints just above, so this
+        // doesn't need its own resolve pass). This is a deliberate, narrow exception to
+        // dummyDefinition.moveTable being otherwise empty ("no AI, never attacks" - see its own
+        // declaration) - the dummy still can never Attack on its own; only this file's explicit
+        // AI-preset logic ever presses the button that selects this move.
+        if (const Game::MoveDefinition* realPunch = characterDefinition.moveTable.FindById("punch"))
+        {
+            Game::MoveDefinition punishMove;
+            punishMove.id = "dummy_punish";
+            punishMove.displayName = "dummy_punish";
+            punishMove.animationClip = realPunch->animationClip;
+            punishMove.inputButton = realPunch->inputButton;
+            punishMove.startupFrames = realPunch->startupFrames;
+            punishMove.activeFrames = realPunch->activeFrames;
+            punishMove.recoveryFrames = realPunch->recoveryFrames;
+            punishMove.onHitStunFrames = realPunch->onHitStunFrames;
+            punishMove.onBlockStunFrames = realPunch->onBlockStunFrames;
+            punishMove.damage = realPunch->damage;
+            punishMove.guardHeight = realPunch->guardHeight;
+            punishMove.hitboxes = realPunch->hitboxes;
+            dummyDefinition.moveTable.moves.push_back(std::move(punishMove));
+        }
     }
 
     // Resolved once, reused every frame below - the skinned mesh node's own skin (this asset
@@ -297,6 +328,13 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     // The stage fighters stand/fight on - real shipped content, not dev-only, so always
     // included below rather than gated behind a checkbox the way the local test scene is.
     std::vector<Renderer::StaticMeshDrawItem> groundPlaneDrawItems{ Game::CreateGroundPlaneDrawItem() };
+    // One small "grounding" shadow quad per fighter - see FighterShadow.h's own comment for why
+    // this is a flat opaque patch, not a real soft shadow. Repositioned every render frame
+    // (below) to track each fighter's current X/Z - kept as separate persistent draw items
+    // (own world buffers), same "each instance owns its own buffer" reasoning every other
+    // per-instance draw item in this project already follows.
+    Renderer::StaticMeshDrawItem playerShadowDrawItem = Game::CreateFighterShadowDrawItem();
+    Renderer::StaticMeshDrawItem dummyShadowDrawItem = Game::CreateFighterShadowDrawItem();
 
     // The character (GPU-skinned) and local test scene/ground plane (rigid) are different draw
     // item types feeding different passes - StaticMeshPass/SkinnedMeshPass never learn a
@@ -318,6 +356,13 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
         skinnedItems.insert(skinnedItems.end(), dummyDrawItems.begin(), dummyDrawItems.end());
         Renderer::SkinnedMeshPass::SetDrawItems(skinnedItems);
         std::vector<Renderer::StaticMeshDrawItem> staticItems = groundPlaneDrawItems;
+        // Same enableCharacter/unconditional split as the skinned items above - player's shadow
+        // follows whether the player mesh itself is shown, dummy's shadow is always there.
+        if (enableCharacter)
+        {
+            staticItems.push_back(playerShadowDrawItem);
+        }
+        staticItems.push_back(dummyShadowDrawItem);
 #ifdef OMD_DEV_TOOLS
         if (enableLocalTestScene)
         {
@@ -381,6 +426,16 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     Engine::InputHistory dummyInputHistory;
     Engine::InputCommand dummyInputCommand;
     bool dummyBlocksHeld = false;
+    // AI behavior preset for the dummy - a testing convenience, not real AI (a few hardcoded
+    // scripted reactions, no evaluation/decision tree): 0 = Manual (dummyBlocksHeld above drives
+    // Block directly, today's original behavior), 1 = Always block, 2 = Block then punish (see
+    // the tick loop below). Declared unconditionally, same reasoning as dummyBlocksHeld.
+    int dummyAiPreset = 0;
+    // Counts down to a scripted punish swing once the dummy's been hit (preset 2 only) - a
+    // fixed delay, not real recovery-frame tracking of whichever move actually hit it (that
+    // would need reading the attacker's own FighterState, more than this testing tool needs).
+    // 0 means "not currently winding up to punish."
+    int dummyPunishCountdown = 0;
     // Latest tick's collision resolution - read by the debug draw list below between ticks, the
     // same "store the final answer" shape lastInputCommand already uses.
     Engine::CollisionEvents lastCollisionEvents;
@@ -599,18 +654,96 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
                         characterModel.clips, characterModel, forceShowAllHitboxes });
             }
 
+            // AI preset decision - see dummyAiPreset's own declaration for why this is a testing
+            // convenience (a few hardcoded scripted reactions), not real AI. lastCollisionEvents
+            // is still last tick's result at this point (ResolveCollisions runs after both
+            // fighters' UpdateFighterState calls below) - the same one-tick-lag every other
+            // reader of it in this loop already accepts.
+            bool dummyBlockThisTick = false;
+            bool dummyPunchThisTick = false;
+            if (dummyAiPreset == 0) // Manual
+            {
+                dummyBlockThisTick = dummyBlocksHeld;
+            }
+            else if (dummyAiPreset == 1) // Always block
+            {
+                dummyBlockThisTick = true;
+            }
+            else // Block then punish
+            {
+                dummyBlockThisTick = true;
+                for (const Engine::HitEvent& hit : lastCollisionEvents.hits)
+                {
+                    if (hit.defender == dummyEntity)
+                    {
+                        constexpr int kDummyPunishDelayTicks = 40; // ~0.67s - a rough "wait for their recovery" heuristic, not frame-exact.
+                        dummyPunishCountdown = kDummyPunishDelayTicks;
+                        break;
+                    }
+                }
+                if (dummyPunishCountdown > 0)
+                {
+                    --dummyPunishCountdown;
+                    if (dummyPunishCountdown == 0)
+                    {
+                        dummyPunchThisTick = true;
+                        dummyBlockThisTick = false; // Swinging, not blocking, on the punish tick itself.
+                    }
+                }
+            }
+
             // The dummy has neither a manual-override nor a hitbox-tuning mode, so it always
             // runs through the real state machine, unconditionally, every tick - reacting to
             // last tick's collision events (from real hurtbox overlap with the player's own
             // Attack hitboxes) exactly like the player's own call above.
             dummyInputCommand.tick = simClock.tickCount;
-            dummyInputCommand.buttons[static_cast<size_t>(Game::FighterButton::Block)].held = dummyBlocksHeld;
+            {
+                Engine::ButtonState& block = dummyInputCommand.buttons[static_cast<size_t>(Game::FighterButton::Block)];
+                block.held = dummyBlockThisTick;
+                // This synthetic command is built by hand rather than through
+                // Engine::AssembleInputCommand, so pressed/released edges (SelectMove only
+                // reads pressedThisTick, never held) have to be derived here the same way that
+                // function derives them - from the previous tick's held state.
+                Engine::ButtonState& punch = dummyInputCommand.buttons[static_cast<size_t>(Game::FighterButton::Punch)];
+                const bool punchWasHeld = punch.held;
+                punch.held = dummyPunchThisTick;
+                punch.pressedThisTick = dummyPunchThisTick && !punchWasHeld;
+                punch.releasedThisTick = !dummyPunchThisTick && punchWasHeld;
+            }
             dummyInputHistory.Push(dummyInputCommand);
             Game::UpdateFighterState(
                 registry, dummyEntity,
                 Game::FighterUpdateInput{
                     dummyInputCommand, dummyInputHistory, lastCollisionEvents, sharedStates, dummyDefinition, characterModel.clips,
                     characterModel, /*forceShowAllHitboxes*/ false });
+
+            // Fighter-vs-fighter body separation - keeps the two from walking through each
+            // other. A simple 1D check (this is a 2D-camera game; only X is a real gameplay
+            // axis - see GameConstants.h), not a real physics solve: if they're closer together
+            // than both bodies' combined half-width, each is pushed half the overlap back out,
+            // symmetric regardless of which one moved into the other. Deliberately separate
+            // from Hurtbox/Hitbox (offense/defense volumes, not solid colliders) - see
+            // kFighterBodyHalfWidth's own comment. Runs after both fighters' UpdateFighterState
+            // calls (using this tick's just-settled positions) and before ResolveCollisions, so
+            // hit resolution tests the already-separated positions, not a still-overlapping one.
+            {
+                Engine::Transform& playerTransform = registry.get<Engine::Transform>(characterEntity);
+                Engine::Transform& dummyTransform = registry.get<Engine::Transform>(dummyEntity);
+                const float minSeparation = Game::kFighterBodyHalfWidth * 2.0f;
+                const float delta = dummyTransform.position.x - playerTransform.position.x;
+                const float absDelta = delta >= 0.0f ? delta : -delta;
+                if (absDelta < minSeparation)
+                {
+                    const float pushEach = (minSeparation - absDelta) * 0.5f;
+                    const float pushDir = delta >= 0.0f ? 1.0f : -1.0f; // Dummy is at/after player's X.
+                    dummyTransform.position.x += pushDir * pushEach;
+                    playerTransform.position.x -= pushDir * pushEach;
+                    // Re-clamp - pushing apart could in principle shove one past the stage edge
+                    // if both were already hugging it when the overlap was resolved.
+                    dummyTransform.position.x = std::clamp(dummyTransform.position.x, -Game::kStageHalfWidth, Game::kStageHalfWidth);
+                    playerTransform.position.x = std::clamp(playerTransform.position.x, -Game::kStageHalfWidth, Game::kStageHalfWidth);
+                }
+            }
 
             // Deterministic, fixed-tick per the networking-readiness design - resolved here, not
             // once per render frame, even though nothing yet moves entities per tick (the debug
@@ -693,6 +826,17 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
             dummyDefinition.facingCorrectionRadians + (registry.get<Game::FighterState>(dummyEntity).facingRight ? 0.0f : DirectX::XM_PI);
         updateFighterRender(characterEntity, playerFacingRadians, manualClipOverride);
         updateFighterRender(dummyEntity, dummyFacingRadians, /*advanceManually*/ false);
+
+        // Shadow discs track their fighter's current X/Z every frame and fade with jump
+        // height (Y) - see FighterShadow.h's own comment.
+        {
+            const Engine::Transform& playerTransform = registry.get<Engine::Transform>(characterEntity);
+            const Engine::Transform& dummyTransform = registry.get<Engine::Transform>(dummyEntity);
+            Game::UpdateFighterShadowPosition(
+                playerShadowDrawItem, playerTransform.position.x, playerTransform.position.y, playerTransform.position.z);
+            Game::UpdateFighterShadowPosition(
+                dummyShadowDrawItem, dummyTransform.position.x, dummyTransform.position.y, dummyTransform.position.z);
+        }
 
 #ifdef OMD_DEV_TOOLS
         // Rebuilt every render frame from the latest resolved tick's events (see above) - cheap
@@ -846,7 +990,12 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
                     "State: %s  Frame: %u  Health: %d/%d  X: %.2f  Y: %.2f", dummyState.currentState.c_str(), dummyState.framesInState,
                     dummyHealth.current, dummyHealth.max, dummyTransform.position.x, dummyTransform.position.y);
             }
+            // See dummyAiPreset's own declaration - a testing convenience, not real AI.
+            static const char* kDummyAiPresetNames[] = { "Manual", "Always block", "Block then punish" };
+            ImGui::Combo("Dummy AI", &dummyAiPreset, kDummyAiPresetNames, IM_ARRAYSIZE(kDummyAiPresetNames));
+            ImGui::BeginDisabled(dummyAiPreset != 0);
             ImGui::Checkbox("Dummy blocks", &dummyBlocksHeld);
+            ImGui::EndDisabled();
 
             // Combined with "Collision debug draw" above (RenderTasks' own toggle) - this alone
             // draws nothing, it just widens WHEN a move's hitbox exists so there's something to
@@ -907,12 +1056,31 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
                             hitboxTuningSaveMessage.clear();
                         }
                         hitboxTuningBoxIndex = std::clamp(hitboxTuningBoxIndex, 0, static_cast<int>(previewMove.hitboxes.size()) - 1);
-                        Engine::CollisionBox& box = previewMove.hitboxes[static_cast<size_t>(hitboxTuningBoxIndex)].box;
+                        Game::MoveHitboxDef& hitboxDef = previewMove.hitboxes[static_cast<size_t>(hitboxTuningBoxIndex)];
+                        Engine::CollisionBox& box = hitboxDef.box;
                         ImGui::SliderFloat3("Offset", &box.offset.x, -1.0f, 1.0f, "%.3f");
                         ImGui::SliderFloat3("Half-extents", &box.halfExtents.x, 0.05f, 1.5f, "%.3f");
+                        // Active-frame window - defaults to [startup, startup+active) (see
+                        // MoveHitboxDef's own comment) but tunable independently here, since
+                        // that default often doesn't line up with when THIS specific retargeted
+                        // clip's own bone is actually near a target - scrub "Frame" above (with
+                        // "Force show all hitboxes" on) to find where contact really looks
+                        // right, then drag these two to match.
+                        int frameStartSlider = static_cast<int>(hitboxDef.frameStart);
+                        int frameEndSlider = static_cast<int>(hitboxDef.frameEnd);
+                        const int previewTotalFramesInt = static_cast<int>(previewTotalFrames);
+                        if (ImGui::SliderInt("Active start frame", &frameStartSlider, 0, previewTotalFramesInt))
+                        {
+                            hitboxDef.frameStart = static_cast<uint32_t>(frameStartSlider);
+                        }
+                        if (ImGui::SliderInt("Active end frame", &frameEndSlider, 0, previewTotalFramesInt))
+                        {
+                            hitboxDef.frameEnd = static_cast<uint32_t>(frameEndSlider);
+                        }
                         if (ImGui::Button("Save to moves.combat"))
                         {
-                            const bool saved = Game::SaveHitboxToFile(kMovesFilePath, previewMove.id, hitboxTuningBoxIndex, box);
+                            const bool saved = Game::SaveHitboxToFile(
+                                kMovesFilePath, previewMove.id, hitboxTuningBoxIndex, box, hitboxDef.frameStart, hitboxDef.frameEnd);
                             hitboxTuningSaveMessage = saved ? "Saved." : "Save failed - see logs/omdlab.log.";
                         }
                         if (!hitboxTuningSaveMessage.empty())
@@ -967,6 +1135,8 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
             registry.replace<Game::Health>(
                 dummyEntity, Game::Health{ dummyDefinition.stats.maxHealth, dummyDefinition.stats.maxHealth });
             dummyBlocksHeld = false;
+            dummyAiPreset = 0;
+            dummyPunishCountdown = 0;
             // Also drop the last-resolved hit(s) - UpdateFighterState reacts to lastCollisionEvents
             // one tick late (see its own comment on why), so without this a hitbox that was still
             // overlapping the instant Reset was clicked would land one more hit right after the

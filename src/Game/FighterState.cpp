@@ -17,8 +17,11 @@ namespace
     // matching the flat-single-stage, one-character-for-now scope. Paired with CharacterStats::
     // jumpSpeed's own default so a neutral jump's total airtime lands close to jump_in_place's
     // own ~1.967s as a starting anchor - an eyeball-tuned starting point, adjust either constant
-    // to change jump feel.
-    constexpr float kGravity = 3.0f;
+    // to change jump feel. Scaled by kCombatSpeedMultiplier so Jump's own physics-derived
+    // airtime shrinks in lockstep with every clip now playing back faster (see that constant's
+    // own comment) - a smaller peak height is an accepted side effect of this specific lever,
+    // not a bug; retune Game::CharacterStats::jumpSpeed upward if jumps read as too low.
+    constexpr float kGravity = 3.0f * Game::kCombatSpeedMultiplier;
 
     // Total push-back distances, queued into FighterState::pushbackRemaining the tick HitStun
     // is entered and eased out over the next several ticks (see kPushbackDecayPerTick below) -
@@ -48,8 +51,18 @@ namespace
 
     // Sets (not Advance()s) the clip and its playback time directly from a tick-derived frame
     // count - see main.cpp's own comment on why this entity's animation is now driven by the
-    // same clock as the combat logic instead of wall-clock deltaSeconds.
-    void SetClip(Engine::ClipPlayback& playback, const std::vector<Asset::Clip>& clips, const std::string& clipName, uint32_t framesElapsed)
+    // same clock as the combat logic instead of wall-clock deltaSeconds. Every clip plays back
+    // kCombatSpeedMultiplier times faster than real elapsed ticks (see that constant's own
+    // comment on GameConstants.h) - safe to apply uniformly here since every fixed-duration
+    // state's own frame counts are scaled by the same factor at load time (MoveTable.cpp's
+    // BuildMoveTable), keeping clip and state duration in sync.
+    //
+    // loop=false holds on the clip's final frame once played through once, instead of
+    // restarting from frame 0 - KO/death shouldn't visibly loop forever the way Idle/Walk/Run
+    // correctly do.
+    void SetClip(
+        Engine::ClipPlayback& playback, const std::vector<Asset::Clip>& clips, const std::string& clipName, uint32_t framesElapsed,
+        bool loop = true)
     {
         const int32_t clipIndex = FindClipIndex(clips, clipName);
         if (clipIndex < 0)
@@ -57,11 +70,25 @@ namespace
             return;
         }
         playback.clipIndex = clipIndex;
-        float t = static_cast<float>(framesElapsed) * Engine::FixedTimestepAccumulator::kFixedDeltaSeconds;
+        float t = static_cast<float>(framesElapsed) * Engine::FixedTimestepAccumulator::kFixedDeltaSeconds * Game::kCombatSpeedMultiplier;
         const float clipDuration = clips[clipIndex].durationSeconds;
         if (clipDuration > 0.0f)
         {
-            t = fmodf(t, clipDuration);
+            if (loop)
+            {
+                t = fmodf(t, clipDuration);
+            }
+            else
+            {
+                // A tiny epsilon back from the true end avoids landing exactly on/after the
+                // last sample, which some samplers could wrap via their own modulo.
+                constexpr float kEndEpsilon = 1.0f / 60.0f;
+                const float heldT = clipDuration - kEndEpsilon;
+                if (t > heldT)
+                {
+                    t = heldT;
+                }
+            }
         }
         playback.playbackTimeSeconds = t;
     }
@@ -267,7 +294,11 @@ namespace
         transform.position.x = std::clamp(transform.position.x, -Game::kStageHalfWidth, Game::kStageHalfWidth);
         if (!clipName.empty())
         {
-            SetClip(clipPlayback, availableClips, clipName, state.framesInState);
+            // Only KO shouldn't loop - see SetClip's own comment. Idle/Walk/Run/Jump are
+            // meant to loop; Attack/HitStun already naturally end (via animationFinished)
+            // well before their clip would visibly wrap, so looping is a non-issue for them.
+            const bool loopClip = state.currentState != "KO";
+            SetClip(clipPlayback, availableClips, clipName, state.framesInState, loopClip);
         }
 
         // Hitbox attach/detach - only ever present while a move's authored window says so. The

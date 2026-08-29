@@ -12,6 +12,7 @@ namespace Renderer
         static void Init();
         static void Shutdown();
         static void SetDrawItems(const std::vector<StaticMeshDrawItem>& items);
-        static void Render(const StaticMeshRenderDesc& desc);
+        static void RenderOpaque(const StaticMeshRenderDesc& desc);
+        static void RenderTransparent(const StaticMeshRenderDesc& desc);
     };
 }

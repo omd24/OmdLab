@@ -1,8 +1,10 @@
 #include "MoveTable.h"
 
+#include "GameConstants.h"
 #include "Asset/Model.h"
 #include "Foundation/Log.h"
 
+#include <cmath>
 #include <cstdio>
 #include <fstream>
 #include <utility>
@@ -142,6 +144,20 @@ namespace Game
                 else Foundation::Log::Write(Severity::Warning, "MoveTable", "unknown field '%s' on move '%s'", name.c_str(), move.id.c_str());
             }
 
+            // Scales every authored frame-count field (not the spatial hitbox fields below) by
+            // 1/kCombatSpeedMultiplier, before BuildHitboxShape derives each hitbox's own
+            // active-frame window from startup/active - see kCombatSpeedMultiplier's own comment
+            // for why this has to move in lockstep with SetClip's faster clip playback rather
+            // than being retuned independently.
+            {
+                const float speedScale = 1.0f / kCombatSpeedMultiplier;
+                move.startupFrames = static_cast<uint32_t>(std::lround(static_cast<float>(move.startupFrames) * speedScale));
+                move.activeFrames = static_cast<uint32_t>(std::lround(static_cast<float>(move.activeFrames) * speedScale));
+                move.recoveryFrames = static_cast<uint32_t>(std::lround(static_cast<float>(move.recoveryFrames) * speedScale));
+                move.onHitStunFrames = static_cast<uint32_t>(std::lround(static_cast<float>(move.onHitStunFrames) * speedScale));
+                move.onBlockStunFrames = static_cast<uint32_t>(std::lround(static_cast<float>(move.onBlockStunFrames) * speedScale));
+            }
+
             for (const CombatDsl::FieldBlock& hitboxBlock : moveDecl.hitboxes)
             {
                 MoveHitboxDef hitboxDef;
@@ -185,7 +201,9 @@ namespace Game
         }
     }
 
-    bool SaveHitboxToFile(const std::string& filePath, const std::string& moveId, int32_t hitboxIndex, const Engine::CollisionBox& box)
+    bool SaveHitboxToFile(
+        const std::string& filePath, const std::string& moveId, int32_t hitboxIndex, const Engine::CollisionBox& box,
+        uint32_t frameStart, uint32_t frameEnd)
     {
         // Binary mode on both ends, deliberately - this project's .combat files are LF-only
         // (confirmed on moves.combat itself), but the default text-mode ofstream on Windows
@@ -222,6 +240,13 @@ namespace Game
         bool inTargetHitbox = false;
         bool enteredHitboxBody = false;
         int hitboxHeaderDepth = 0;
+        // Line index of the target hitbox's own closing '}' - captured so a missing
+        // frameStart/frameEnd line can be inserted right before it (see the loop's own end).
+        size_t hitboxCloseLine = 0;
+        // Indentation to use for any newly INSERTED frameStart/frameEnd line - copied from
+        // whichever existing field line is matched first below, so an inserted line looks
+        // exactly like its siblings rather than guessing a hardcoded indent width.
+        std::string capturedIndent;
         const std::string moveHeaderText = "move " + moveId;
 
         struct FieldTarget
@@ -229,10 +254,18 @@ namespace Game
             const char* name;
             float value;
             bool written;
+            // true: missing this line is a hard failure (existing offset/half-extent
+            // behavior). false: missing is expected/common (frameStart/frameEnd usually
+            // aren't authored at all, defaulting to [startup, startup+active) instead - see
+            // MoveHitboxDef's own comment) - a new line gets INSERTED for it instead of
+            // failing.
+            bool required;
         };
-        FieldTarget targets[6] = {
-            { "offsetX", box.offset.x, false }, { "offsetY", box.offset.y, false }, { "offsetZ", box.offset.z, false },
-            { "halfX", box.halfExtents.x, false }, { "halfY", box.halfExtents.y, false }, { "halfZ", box.halfExtents.z, false },
+        FieldTarget targets[8] = {
+            { "offsetX", box.offset.x, false, true }, { "offsetY", box.offset.y, false, true },
+            { "offsetZ", box.offset.z, false, true }, { "halfX", box.halfExtents.x, false, true },
+            { "halfY", box.halfExtents.y, false, true }, { "halfZ", box.halfExtents.z, false, true },
+            { "frameStart", static_cast<float>(frameStart), false, false }, { "frameEnd", static_cast<float>(frameEnd), false, false },
         };
 
         for (size_t i = 0; i < lines.size(); ++i)
@@ -269,6 +302,10 @@ namespace Game
                             const std::string indent = lines[i].substr(0, firstNonSpace);
                             lines[i] = indent + target.name + " " + FormatCombatNumber(target.value);
                             target.written = true;
+                            if (capturedIndent.empty())
+                            {
+                                capturedIndent = indent;
+                            }
                             break;
                         }
                     }
@@ -300,6 +337,7 @@ namespace Game
                 }
                 else if (enteredHitboxBody && depth == hitboxHeaderDepth)
                 {
+                    hitboxCloseLine = i;
                     break; // Target hitbox's own body is closed - nothing left to find.
                 }
             }
@@ -312,20 +350,38 @@ namespace Game
                 hitboxIndex, hitboxCounter + 1, filePath.c_str());
             return false;
         }
-        bool allWritten = true;
+        bool allRequiredWritten = true;
         for (const FieldTarget& target : targets)
         {
-            if (!target.written)
+            if (target.required && !target.written)
             {
                 Foundation::Log::Write(
                     Severity::Error, "MoveTable", "SaveHitboxToFile: move '%s' hitbox #%d has no '%s' field line to rewrite in '%s'",
                     moveId.c_str(), hitboxIndex, target.name, filePath.c_str());
-                allWritten = false;
+                allRequiredWritten = false;
             }
         }
-        if (!allWritten)
+        if (!allRequiredWritten)
         {
             return false;
+        }
+
+        // Any non-required target still missing (frameStart/frameEnd, typically - see
+        // FieldTarget::required's own comment) gets a brand-new line inserted right before the
+        // hitbox block's own closing '}', rather than failing - this is the expected common
+        // case for a hitbox that's never had its active-frame window explicitly authored
+        // before.
+        std::vector<std::string> linesToInsert;
+        for (const FieldTarget& target : targets)
+        {
+            if (!target.required && !target.written)
+            {
+                linesToInsert.push_back(capturedIndent + target.name + " " + FormatCombatNumber(target.value));
+            }
+        }
+        if (!linesToInsert.empty())
+        {
+            lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(hitboxCloseLine), linesToInsert.begin(), linesToInsert.end());
         }
 
         std::ofstream out(filePath, std::ios::binary | std::ios::trunc);

@@ -19,6 +19,13 @@ cbuffer BonePaletteConstants : register(b2)
     row_major float4x4 BonePalette[32];
 };
 
+// Per-item tint/alpha multiplier - see LitTextured.hlsl's own TintConstants comment (the same
+// mechanism, at b3 here since b2 is already the bone palette in this shader).
+cbuffer TintConstants : register(b3)
+{
+    float4 TintAndAlpha;
+};
+
 Texture2D BaseColorTexture : register(t0);
 SamplerState BaseColorSampler : register(s0);
 
@@ -77,5 +84,5 @@ float4 PSMain(PSInput input) : SV_TARGET
     float diffuse = max(dot(normal, -lightDirection), 0.0f);
     float lighting = saturate(0.25f + diffuse * 0.85f);
 
-    return float4(baseColor.rgb * lighting, baseColor.a);
+    return float4(baseColor.rgb * lighting * TintAndAlpha.rgb, baseColor.a * TintAndAlpha.a);
 }

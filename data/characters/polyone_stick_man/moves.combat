@@ -31,12 +31,14 @@ move punch
     hitbox
     {
         bone "LeftHand_010"
-        offsetX 0.05
+        offsetX 0.282
         offsetY 0
         offsetZ 0
         halfX 0.2
         halfY 0.15
         halfZ 0.15
+        frameStart 14
+        frameEnd 21
     }
 
     cancel kick_light
@@ -61,11 +63,13 @@ move kick_light
     hitbox
     {
         bone "LeftFoot_017"
-        offsetX 0
-        offsetY 0
+        offsetX 0.087
+        offsetY 0.2
         offsetZ 0
-        halfX 0.18
-        halfY 0.18
+        halfX 0.264
+        halfY 0.221
         halfZ 0.18
+        frameStart 22
+        frameEnd 30
     }
 }

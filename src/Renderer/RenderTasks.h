@@ -12,6 +12,7 @@
 #include "SkinnedMeshPass.h"
 #include "StaticMeshPass.h"
 #include "Texture.h"
+#include "UIPass.h"
 
 #include <DirectXMath.h>
 #include <functional>
@@ -51,6 +52,7 @@ namespace Renderer
             ForwardPass::Init();
             StaticMeshPass::Init();
             SkinnedMeshPass::Init();
+            UIPass::Init();
 #ifdef OMD_DEV_TOOLS
             // DebugDrawPass and ImGui are dev-only tooling (see build/main.sharpmake.cs's
             // OMD_DEV_TOOLS comment) - gated together since DebugDrawPass is only ever toggled
@@ -66,6 +68,7 @@ namespace Renderer
             ImGuiHelper::Shutdown();
             DebugDrawPass::Shutdown();
 #endif
+            UIPass::Shutdown();
             SkinnedMeshPass::Shutdown();
             StaticMeshPass::Shutdown();
             ForwardPass::Shutdown();
@@ -188,8 +191,22 @@ namespace Renderer
             // nothing on its own. A separate switch on top of that would just be a second,
             // easy-to-desync way to hide the same content the caller's own draw-item
             // selection (see extraDebugUI above) already controls.
-            StaticMeshPass::Render({ viewProjection });
-            SkinnedMeshPass::Render({ viewProjection });
+            //
+            // Opaque-then-transparent is deliberately a GLOBAL ordering across both passes,
+            // not something each pass does independently - every opaque draw (either mesh
+            // type) must happen before any transparent draw (either mesh type), or a
+            // transparent static-mesh item (e.g. a fighter's shadow) could render before a
+            // still-opaque skinned character it should be blending against. See
+            // StaticMeshPass::RenderOpaque/RenderTransparent's own comment.
+            StaticMeshPass::RenderOpaque({ viewProjection });
+            SkinnedMeshPass::RenderOpaque({ viewProjection });
+            StaticMeshPass::RenderTransparent({ viewProjection });
+            SkinnedMeshPass::RenderTransparent({ viewProjection });
+            // Unconditional, not OMD_DEV_TOOLS-gated - real UI is shipped content once it
+            // exists, same "always-on, data-driven" precedent StaticMeshPass/SkinnedMeshPass
+            // already follow (today this is an empty stub, so it draws nothing regardless -
+            // see UIPass.h's own comment).
+            UIPass::Render();
 #ifdef OMD_DEV_TOOLS
             if (enableDebugDrawPass)
             {

@@ -27,15 +27,23 @@ namespace Renderer
         }
 
         // Replaces the current draw item list - see StaticMeshPass::SetDrawItems, same
-        // not-per-frame contract.
+        // not-per-frame contract. Internally partitions by SkinnedMeshDrawItem::transparent,
+        // same as StaticMeshPass.
         static void SetDrawItems(const std::vector<SkinnedMeshDrawItem>& items)
         {
             OMD_GFX_CALL(SkinnedMeshPass, SetDrawItems(items));
         }
 
-        static void Render(const SkinnedMeshRenderDesc& desc)
+        // Split into two entry points, same reasoning as StaticMeshPass::RenderOpaque/
+        // RenderTransparent - see that pass's own comment and RenderTasks::DoFrame.
+        static void RenderOpaque(const SkinnedMeshRenderDesc& desc)
         {
-            OMD_GFX_CALL(SkinnedMeshPass, Render(desc));
+            OMD_GFX_CALL(SkinnedMeshPass, RenderOpaque(desc));
+        }
+
+        static void RenderTransparent(const SkinnedMeshRenderDesc& desc)
+        {
+            OMD_GFX_CALL(SkinnedMeshPass, RenderTransparent(desc));
         }
     };
 }

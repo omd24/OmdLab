@@ -46,6 +46,21 @@ namespace Renderer
         // Asset::Material::doubleSided) needs two PSOs and to pick per draw item, not this.
         bool cullBackFaces = true;
 
+        // Off by default - every existing PSO draws fully opaque, unblended. On enables
+        // standard straight-alpha "over" blending so a draw's own alpha (from its texture
+        // and/or a per-item tint - see StaticMeshDrawItem::tintBuffer) controls how much of
+        // what's already in the render target shows through. Per-pass switch, not
+        // per-draw-item - a pass mixing opaque and transparent content needs two PSOs and to
+        // partition its own draw list (see StaticMeshPassDX12), not a bool here.
+        bool alphaBlendEnabled = false;
+
+        // On by default (matches every existing PSO's implicit behavior before this field
+        // existed). Off for a blended PSO whose draws should still depth-TEST against opaque
+        // content already in the depth buffer, but not depth-WRITE - this project relies on
+        // draw-list order, not per-pixel order-independent transparency, for overlapping
+        // transparent draws.
+        bool depthWriteEnabled = true;
+
         // Triangle by default - every pass so far draws triangles. DebugDrawPass is the first
         // consumer of Line (wireframe boxes), hence this being caller-configurable at all rather
         // than hardcoded like it was before that pass existed.

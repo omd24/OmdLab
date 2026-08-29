@@ -138,8 +138,8 @@ namespace Game
     // authored," so a typo degrades to the old root-relative behavior rather than crashing.
     void ResolveHitboxJoints(const Asset::Model& model, MoveTable& moveTable);
 
-    // Targeted text patch for the hitbox-tuning debug tool's "Save" button - rewrites just the
-    // six numeric offsetX/offsetY/offsetZ/halfX/halfY/halfZ field lines of one hitbox block
+    // Targeted text patch for the hitbox-tuning debug tool's "Save" button - rewrites the six
+    // numeric offsetX/offsetY/offsetZ/halfX/halfY/halfZ field lines of one hitbox block
     // (identified by moveId + its position among that move's own hitbox{} blocks), leaving every
     // other line - comments, other fields, formatting - byte-for-byte untouched. Deliberately NOT
     // a general CombatDsl serializer: regenerating the whole file from the parsed AST would lose
@@ -149,7 +149,19 @@ namespace Game
     // parse - relies on this project's own authored style (each "move"/"hitbox" keyword's body
     // opening "{" can be on the same or the next line; a field's value is whatever follows its
     // name on that same line, comment-stripped). Returns false (logs why, never touches the file)
-    // if the move, the Nth hitbox, or any of the six field lines can't be found - a save must
-    // never silently do nothing or partially apply.
-    bool SaveHitboxToFile(const std::string& filePath, const std::string& moveId, int32_t hitboxIndex, const Engine::CollisionBox& box);
+    // if the move, the Nth hitbox, or any of the six offset/half-extent field lines can't be
+    // found - a save must never silently do nothing or partially apply.
+    //
+    // frameStart/frameEnd are handled differently from the six spatial fields above: since
+    // MoveHitboxDef::frameStart/frameEnd default to [startup, startup+active) rather than always
+    // being explicitly authored (see BuildHitboxShape), a hitbox block frequently has no existing
+    // frameStart/frameEnd LINE to rewrite at all. Rather than failing in that (common, expected)
+    // case, this function INSERTS a new line for whichever of the two is missing, right before
+    // the hitbox block's own closing "}", indented to match whatever indentation the existing
+    // offset/half-extent lines in that same block already use. An existing frameStart/frameEnd
+    // line (a move that's already had its timing tuned once before) is rewritten in place, same
+    // as the six spatial fields.
+    bool SaveHitboxToFile(
+        const std::string& filePath, const std::string& moveId, int32_t hitboxIndex, const Engine::CollisionBox& box,
+        uint32_t frameStart, uint32_t frameEnd);
 }

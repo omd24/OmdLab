@@ -28,5 +28,16 @@ namespace Renderer
         // Per-joint skinning matrices, updated in place every frame as the pose advances
         // (unlike worldBuffer, which is set once) - see Engine::UpdateSkinnedPose.
         BufferHandle bonePaletteBuffer;
+
+        // Unset (default-constructed, index == -1) for ordinary opaque content - the pass
+        // binds its own shared white/opaque default in that case (see SkinnedMeshPassDX12),
+        // mirroring StaticMeshDrawItem::tintBuffer's own comment. Nothing sets this yet
+        // (no skinned content currently fades) - built ahead of a concrete need, at the
+        // user's own explicit request, so a future VFX/UI feature (a hit-flash, a fade-out)
+        // has somewhere to plug in.
+        BufferHandle tintBuffer;
+
+        // False (opaque) by default - see StaticMeshDrawItem::transparent's own comment.
+        bool transparent = false;
     };
 }

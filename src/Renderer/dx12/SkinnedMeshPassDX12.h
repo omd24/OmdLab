@@ -12,6 +12,7 @@ namespace Renderer
         static void Init();
         static void Shutdown();
         static void SetDrawItems(const std::vector<SkinnedMeshDrawItem>& items);
-        static void Render(const SkinnedMeshRenderDesc& desc);
+        static void RenderOpaque(const SkinnedMeshRenderDesc& desc);
+        static void RenderTransparent(const SkinnedMeshRenderDesc& desc);
     };
 }

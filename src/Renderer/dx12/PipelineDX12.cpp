@@ -146,10 +146,24 @@ namespace Renderer
         psoDesc.RasterizerState.CullMode = desc.cullBackFaces ? D3D12_CULL_MODE_BACK : D3D12_CULL_MODE_NONE;
         psoDesc.RasterizerState.DepthClipEnable = TRUE;
 
-        psoDesc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+        D3D12_RENDER_TARGET_BLEND_DESC& rtBlend = psoDesc.BlendState.RenderTarget[0];
+        rtBlend.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+        rtBlend.BlendEnable = desc.alphaBlendEnabled ? TRUE : FALSE;
+        if (desc.alphaBlendEnabled)
+        {
+            // Standard straight-alpha "over" blend - a draw's own alpha (texture and/or
+            // per-item tint) controls how much of what's already in the render target shows
+            // through.
+            rtBlend.SrcBlend = D3D12_BLEND_SRC_ALPHA;
+            rtBlend.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+            rtBlend.BlendOp = D3D12_BLEND_OP_ADD;
+            rtBlend.SrcBlendAlpha = D3D12_BLEND_ONE;
+            rtBlend.DestBlendAlpha = D3D12_BLEND_ZERO;
+            rtBlend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+        }
 
         psoDesc.DepthStencilState.DepthEnable = desc.depthTestEnabled ? TRUE : FALSE;
-        psoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+        psoDesc.DepthStencilState.DepthWriteMask = desc.depthWriteEnabled ? D3D12_DEPTH_WRITE_MASK_ALL : D3D12_DEPTH_WRITE_MASK_ZERO;
         psoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
         psoDesc.DepthStencilState.StencilEnable = FALSE;
         // A DSVFormat other than UNKNOWN is only valid when depth testing is

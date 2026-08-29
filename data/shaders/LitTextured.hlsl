@@ -10,6 +10,17 @@ cbuffer ObjectConstants : register(b1)
     row_major float4x4 World;
 };
 
+// Per-item tint/alpha multiplier - white/opaque {1,1,1,1} for ordinary opaque content (the
+// pass binds a shared default buffer when a draw item doesn't set its own - see
+// StaticMeshPassDX12), a real per-frame value for content that fades (e.g. a fighter's own
+// shadow, fading with jump height). Distinct from ObjectConstants/World above since the two
+// update at different cadences (World: once for static geometry, every frame for animated;
+// tint: every frame for exactly the content that needs to fade, unused otherwise).
+cbuffer TintConstants : register(b2)
+{
+    float4 TintAndAlpha;
+};
+
 Texture2D BaseColorTexture : register(t0);
 SamplerState BaseColorSampler : register(s0);
 
@@ -52,5 +63,5 @@ float4 PSMain(PSInput input) : SV_TARGET
     float diffuse = max(dot(normal, -lightDirection), 0.0f);
     float lighting = saturate(0.25f + diffuse * 0.85f);
 
-    return float4(baseColor.rgb * lighting, baseColor.a);
+    return float4(baseColor.rgb * lighting * TintAndAlpha.rgb, baseColor.a * TintAndAlpha.a);
 }
