@@ -2,14 +2,27 @@
 
 namespace Game
 {
-    // Stage bounds - X is the real gameplay movement axis (walk/run/jump), clamped so fighters
-    // can't wander into infinity; Z is purely a visual "how deep is the stage" dimension, no
-    // gameplay logic ever reads it (this is a 2D-camera fighting game - the "2D" is the promise
-    // no gameplay system needs Z). One shared source for both the ground plane's own mesh extent
-    // (GroundPlane.cpp) and the movement clamp (FighterState.cpp), so retuning stage size never
-    // means updating two independently-drifting numbers.
+    // Stage bounds - X is the real gameplay movement axis (walk/run/jump); Z is purely a visual
+    // "how deep is the stage" dimension, no gameplay logic ever reads it (this is a 2D-camera
+    // fighting game - the "2D" is the promise no gameplay system needs Z). kStageHalfWidth is
+    // the visible ground plane's own mesh extent (GroundPlane.cpp).
     constexpr float kStageHalfWidth = 6.0f;
     constexpr float kStageHalfDepth = 1.5f;
+
+    // Movement is clamped a margin short of the plane edge, not to it: a fighter stopped exactly
+    // at kStageHalfWidth hangs its (wider-than-a-point) body out over the void past the floor.
+    // The leftover strip of ground beyond the wall reads as an intentional stage edge, same as a
+    // real fighting stage. Eyeball-tuned - raise kStageWallMargin if the body still overhangs,
+    // lower it for more usable floor.
+    constexpr float kStageWallMargin = 0.5f;
+    constexpr float kStageMovementHalfWidth = kStageHalfWidth - kStageWallMargin;
+
+    // Facing (which way a fighter turns to look at the opponent) is frozen while either fighter
+    // is within this distance of a wall. Right at the corner a jump-over just bounces off the
+    // wall back to the same side, and re-deriving facing every tick from who-is-left-of-whom
+    // while the separation push nudges the two back and forth flickers the characters through
+    // rapid unnatural face-switches. Outside this zone facing snaps normally.
+    constexpr float kCornerFacingLockMargin = 0.5f;
 
     // Global playback-rate multiplier for every fighter animation clip (FighterState.cpp's
     // SetClip) - the cheapest lever for "animations feel too slow/sluggish" that doesn't need

@@ -320,10 +320,11 @@ namespace
         }
         // Stage bounds - applied once here regardless of which state above actually moved the
         // character (Walk/Run/Jump all funnel through moveUnitsPerSecond), same "one clamp,
-        // not one per state" reasoning as Jump's own Y-ground clamp. kStageHalfWidth is also
-        // what the ground plane's own mesh is sized from (GroundPlane.cpp) - one shared constant
-        // so the visible floor and this clamp can't drift out of sync with each other.
-        transform.position.x = std::clamp(transform.position.x, -Game::kStageHalfWidth, Game::kStageHalfWidth);
+        // not one per state" reasoning as Jump's own Y-ground clamp. kStageMovementHalfWidth is
+        // derived from the ground plane's own kStageHalfWidth (GroundPlane.cpp) minus a wall
+        // margin, so the visible floor and this clamp stay tied to one stage-size constant while
+        // still keeping the whole fighter body on the floor - see GameConstants.h.
+        transform.position.x = std::clamp(transform.position.x, -Game::kStageMovementHalfWidth, Game::kStageMovementHalfWidth);
         if (!clipName.empty())
         {
             // Only KO shouldn't loop - see SetClip's own comment. Idle/Walk/Run/Jump are

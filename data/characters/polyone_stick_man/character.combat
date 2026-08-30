@@ -48,7 +48,7 @@ character
     ko
     {
         dropOffsetY -0.5
-        dropStartFrame 0
-        dropEndFrame 0
+        dropStartFrame 6
+        dropEndFrame 28
     }
 }

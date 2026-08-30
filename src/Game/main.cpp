@@ -589,11 +589,22 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
             // fighter is more to the left faces right (toward the other) and vice versa - always
             // facing the opponent regardless of which way either is currently walking/attacking,
             // so crossups/jumping past an opponent don't leave anyone facing backward.
+            //
+            // Exception: while either fighter is right up against a wall, facing is left frozen
+            // at last tick's value - a jump-over there just bounces off the wall back to the
+            // same side, and re-deriving facing each tick as the separation push jitters the two
+            // past each other produces a rapid unnatural face-switch flicker. See
+            // kCornerFacingLockMargin.
             {
                 const float playerX = registry.get<Engine::Transform>(characterEntity).position.x;
                 const float dummyX = registry.get<Engine::Transform>(dummyEntity).position.x;
-                registry.get<Game::FighterState>(characterEntity).facingRight = playerX <= dummyX;
-                registry.get<Game::FighterState>(dummyEntity).facingRight = dummyX <= playerX;
+                const float cornerEdge = Game::kStageMovementHalfWidth - Game::kCornerFacingLockMargin;
+                const bool nearCorner = std::fabs(playerX) >= cornerEdge || std::fabs(dummyX) >= cornerEdge;
+                if (!nearCorner)
+                {
+                    registry.get<Game::FighterState>(characterEntity).facingRight = playerX <= dummyX;
+                    registry.get<Game::FighterState>(dummyEntity).facingRight = dummyX <= playerX;
+                }
             }
 
             // See disableCharacterAnalogStickMovement's own declaration - unconditionally false
@@ -744,19 +755,28 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
             {
                 Engine::Transform& playerTransform = registry.get<Engine::Transform>(characterEntity);
                 Engine::Transform& dummyTransform = registry.get<Engine::Transform>(dummyEntity);
+                // Skip separation entirely while either fighter is off the ground - a jump then
+                // carries a fighter over/past the opponent (crossup), the standard fighting-game
+                // behavior, instead of an airborne fighter shoving the grounded one around. A
+                // grounded fighter's position.y is exactly 0 (only the KO drop goes negative);
+                // Jump drives it positive. Once both land overlapping, this runs again next tick
+                // and separates them onto opposite sides, which is the intended result.
+                const bool eitherAirborne = playerTransform.position.y > 0.01f || dummyTransform.position.y > 0.01f;
                 const float minSeparation = Game::kFighterBodyHalfWidth * 2.0f;
                 const float delta = dummyTransform.position.x - playerTransform.position.x;
                 const float absDelta = delta >= 0.0f ? delta : -delta;
-                if (absDelta < minSeparation)
+                if (!eitherAirborne && absDelta < minSeparation)
                 {
                     const float pushEach = (minSeparation - absDelta) * 0.5f;
                     const float pushDir = delta >= 0.0f ? 1.0f : -1.0f; // Dummy is at/after player's X.
                     dummyTransform.position.x += pushDir * pushEach;
                     playerTransform.position.x -= pushDir * pushEach;
-                    // Re-clamp - pushing apart could in principle shove one past the stage edge
-                    // if both were already hugging it when the overlap was resolved.
-                    dummyTransform.position.x = std::clamp(dummyTransform.position.x, -Game::kStageHalfWidth, Game::kStageHalfWidth);
-                    playerTransform.position.x = std::clamp(playerTransform.position.x, -Game::kStageHalfWidth, Game::kStageHalfWidth);
+                    // Re-clamp - pushing apart could in principle shove one past the wall if both
+                    // were already hugging it when the overlap was resolved.
+                    dummyTransform.position.x =
+                        std::clamp(dummyTransform.position.x, -Game::kStageMovementHalfWidth, Game::kStageMovementHalfWidth);
+                    playerTransform.position.x =
+                        std::clamp(playerTransform.position.x, -Game::kStageMovementHalfWidth, Game::kStageMovementHalfWidth);
                 }
             }
 
