@@ -1,0 +1,54 @@
+# Stick Man - identity, stats, and the per-asset render corrections this specific source
+# asset needs. The moveset is authored in the file named by "moves" below; this file is the
+# single entry point (LoadCharacterDefinition) that pulls in both.
+
+character
+{
+    name "Stick Man"
+    model "StickMan.glb"
+    moves "moves.combat"
+
+    stats
+    {
+        maxHealth 100
+        walkSpeed 2.0
+        runSpeed  4.0
+        jumpSpeed 3.0
+    }
+
+    # Render-space fix-ups for this source asset. Applied by the engine when drawing (and, where
+    # noted, when placing bone-attached hitboxes); simulation state is never affected.
+    correction
+    {
+        # Sketchfab's FBX-to-glTF conversion wraps the scene in a node carrying a 0.01
+        # unit-conversion scale, which collapses the model to centimetre scale when it is
+        # imported on its own. 100 undoes it. Baked into the mesh vertex data at load time; the
+        # skeleton is already true-scale and is left untouched.
+        assetScale 100
+
+        # The source asset faces along +Z (its front toward a camera placed there). This game is
+        # a 2D side view - camera looking down +Z, X the screen-horizontal axis - so the profile
+        # has to face the camera instead. 90 degrees turns it. Applied to mesh and skeleton
+        # together, per frame.
+        facingDegrees 90
+
+        # Constant downward shift that seats the feet on the Y=0 ground plane: the model's origin
+        # sits above the soles, so without this every pose renders slightly above the floor.
+        # Render/collision-space only - "position.y == 0 means grounded" stays true as a gameplay
+        # contract. Tuned live from the dev-tools "Character" panel; 0 disables it.
+        groundingOffsetY -0.08
+    }
+
+    # KO settle-to-ground ramp. The retargeted "ko" clip animates the fall with its root joint
+    # held at standing hip height, so the body ends the clip lying in mid-air. While a fighter is
+    # in the KO state, its Y eases from 0 to dropOffsetY across clip frames
+    # [dropStartFrame, dropEndFrame], then holds there for the rest of KO (the clip already
+    # freezes its final pose). Frame numbers are raw-clip frames - the engine rescales them for
+    # playback speed. dropOffsetY 0 disables the ramp and leaves KO untouched.
+    ko
+    {
+        dropOffsetY -0.5
+        dropStartFrame 0
+        dropEndFrame 0
+    }
+}

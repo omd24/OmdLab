@@ -86,6 +86,15 @@ namespace
         }
         return box;
     }
+
+    // Everything up to (not including) the last '/' or '\' - "" if the path has no separator.
+    // Used to resolve character.combat's "moves" reference and its own modelDirectory relative
+    // to where the character file itself lives, so the whole character folder is relocatable.
+    std::string DirectoryOf(const std::string& path)
+    {
+        const size_t slash = path.find_last_of("/\\");
+        return slash == std::string::npos ? std::string() : path.substr(0, slash);
+    }
 }
 
 namespace Game
@@ -168,6 +177,122 @@ namespace Game
 
             move.cancels = std::move(moveDecl.cancels);
             outTable.moves.push_back(std::move(move));
+        }
+        return true;
+    }
+
+    void BuildCharacterDefinition(const CombatDsl::CharacterDecl& decl, CharacterDefinition& outDefinition)
+    {
+        for (const auto& [name, value] : decl.fields)
+        {
+            if (name == "name") outDefinition.displayName = value.stringValue;
+            else if (name == "model") outDefinition.modelFile = value.stringValue;
+            else if (name == "moves") {} // Consumed by LoadCharacterDefinition - recognized, not an unknown field.
+            else Foundation::Log::Write(Severity::Warning, "MoveTable", "unknown character field '%s'", name.c_str());
+        }
+
+        for (const auto& [name, value] : decl.stats)
+        {
+            if (name == "maxHealth") outDefinition.stats.maxHealth = static_cast<int32_t>(value.numberValue);
+            else if (name == "walkSpeed") outDefinition.stats.walkSpeed = static_cast<float>(value.numberValue);
+            else if (name == "runSpeed") outDefinition.stats.runSpeed = static_cast<float>(value.numberValue);
+            else if (name == "jumpSpeed") outDefinition.stats.jumpSpeed = static_cast<float>(value.numberValue);
+            else Foundation::Log::Write(Severity::Warning, "MoveTable", "unknown character stats field '%s'", name.c_str());
+        }
+
+        for (const auto& [name, value] : decl.correction)
+        {
+            if (name == "assetScale")
+            {
+                const float scale = static_cast<float>(value.numberValue);
+                DirectX::XMStoreFloat4x4(&outDefinition.assetCorrection, DirectX::XMMatrixScaling(scale, scale, scale));
+            }
+            else if (name == "facingDegrees")
+            {
+                outDefinition.facingCorrectionRadians = static_cast<float>(value.numberValue) * (DirectX::XM_PI / 180.0f);
+            }
+            else if (name == "groundingOffsetY")
+            {
+                outDefinition.groundingOffsetY = static_cast<float>(value.numberValue);
+            }
+            else
+            {
+                Foundation::Log::Write(Severity::Warning, "MoveTable", "unknown character correction field '%s'", name.c_str());
+            }
+        }
+
+        // Same reciprocal frame scaling BuildMoveTable applies to a move's own frame fields, and
+        // for the same reason (see kCombatSpeedMultiplier's comment): the "ko" clip plays back
+        // at kCombatSpeedMultiplier rate, so a window authored against the raw clip's frame
+        // numbers has to be divided by the multiplier to line up with framesInState at runtime.
+        const float speedScale = 1.0f / kCombatSpeedMultiplier;
+        for (const auto& [name, value] : decl.ko)
+        {
+            if (name == "dropOffsetY")
+            {
+                outDefinition.koDropOffsetY = static_cast<float>(value.numberValue);
+            }
+            else if (name == "dropStartFrame")
+            {
+                outDefinition.koDropStartFrame = static_cast<uint32_t>(std::lround(static_cast<float>(value.numberValue) * speedScale));
+            }
+            else if (name == "dropEndFrame")
+            {
+                outDefinition.koDropEndFrame = static_cast<uint32_t>(std::lround(static_cast<float>(value.numberValue) * speedScale));
+            }
+            else
+            {
+                Foundation::Log::Write(Severity::Warning, "MoveTable", "unknown character ko field '%s'", name.c_str());
+            }
+        }
+    }
+
+    bool LoadCharacterDefinition(const std::string& characterCombatPath, CharacterDefinition& outDefinition)
+    {
+        CombatDsl::CombatFile file;
+        if (!CombatDsl::LoadCombatFile(characterCombatPath, file))
+        {
+            return false; // LoadCombatFile already logged the reason.
+        }
+        if (!file.character.has_value())
+        {
+            Foundation::Log::Write(
+                Severity::Error, "MoveTable", "LoadCharacterDefinition: '%s' has no 'character' block", characterCombatPath.c_str());
+            return false;
+        }
+
+        BuildCharacterDefinition(*file.character, outDefinition);
+
+        const std::string directory = DirectoryOf(characterCombatPath);
+        outDefinition.modelDirectory = directory;
+
+        std::string movesReference;
+        for (const auto& [name, value] : file.character->fields)
+        {
+            if (name == "moves")
+            {
+                movesReference = value.stringValue;
+            }
+        }
+        if (movesReference.empty())
+        {
+            Foundation::Log::Write(
+                Severity::Error, "MoveTable", "LoadCharacterDefinition: '%s' character block has no 'moves' field",
+                characterCombatPath.c_str());
+            return false;
+        }
+
+        const std::string movesPath = directory.empty() ? movesReference : directory + "/" + movesReference;
+        CombatDsl::CombatFile movesFile;
+        if (!CombatDsl::LoadCombatFile(movesPath, movesFile))
+        {
+            return false; // Already logged.
+        }
+        if (!BuildMoveTable(std::move(movesFile), outDefinition.moveTable))
+        {
+            Foundation::Log::Write(
+                Severity::Error, "MoveTable", "LoadCharacterDefinition: failed to build move table from '%s'", movesPath.c_str());
+            return false;
         }
         return true;
     }
@@ -401,6 +526,146 @@ namespace Game
         Foundation::Log::Write(
             Severity::Info, "MoveTable", "SaveHitboxToFile: saved hitbox #%d of move '%s' to '%s'", hitboxIndex, moveId.c_str(),
             filePath.c_str());
+        return true;
+    }
+
+    bool SaveCharacterToFile(
+        const std::string& filePath, float groundingOffsetY, float koDropOffsetY, uint32_t koDropStartFrameRaw,
+        uint32_t koDropEndFrameRaw)
+    {
+        // Same targeted line-rewrite approach as SaveHitboxToFile (see its own comment on binary
+        // mode / CRLF), but simpler: character.combat always authors all four of these field
+        // lines, so there is no insert path - a missing target line is a hard failure. Frame
+        // values are written back as RAW clip frames (the caller undoes the 1/kCombatSpeedMultiplier
+        // load-time scaling before calling this), so the file round-trips to the same numbers a
+        // person authored.
+        std::ifstream in(filePath, std::ios::binary);
+        if (!in.is_open())
+        {
+            Foundation::Log::Write(Severity::Error, "MoveTable", "SaveCharacterToFile: failed to open '%s' for reading", filePath.c_str());
+            return false;
+        }
+        std::vector<std::string> lines;
+        {
+            std::string line;
+            while (std::getline(in, line))
+            {
+                if (!line.empty() && line.back() == '\r')
+                {
+                    line.pop_back();
+                }
+                lines.push_back(line);
+            }
+        }
+        in.close();
+
+        int depth = 0;
+        bool foundCharacter = false;
+        bool inCharacterBlock = false;
+        bool enteredCharacterBody = false;
+        int characterHeaderDepth = 0;
+
+        struct FieldTarget
+        {
+            const char* name;
+            float value;
+            bool written;
+        };
+        FieldTarget targets[4] = {
+            { "groundingOffsetY", groundingOffsetY, false },
+            { "dropOffsetY", koDropOffsetY, false },
+            { "dropStartFrame", static_cast<float>(koDropStartFrameRaw), false },
+            { "dropEndFrame", static_cast<float>(koDropEndFrameRaw), false },
+        };
+
+        for (size_t i = 0; i < lines.size(); ++i)
+        {
+            const std::string stripped = StripCombatComment(lines[i]);
+            const std::string trimmed = TrimCombatLine(stripped);
+            const int depthBefore = depth;
+
+            if (!inCharacterBlock && depthBefore == 0 && trimmed == "character")
+            {
+                foundCharacter = true;
+                inCharacterBlock = true;
+                characterHeaderDepth = depthBefore;
+            }
+            else if (inCharacterBlock && depthBefore >= characterHeaderDepth + 1)
+            {
+                // Any depth inside the character block - the four field names are distinct
+                // across the whole file, so no need to also track which sub-block (correction /
+                // ko) a given line sits in.
+                const size_t firstNonSpace = lines[i].find_first_not_of(" \t");
+                if (firstNonSpace != std::string::npos)
+                {
+                    const size_t tokenEnd = trimmed.find_first_of(" \t");
+                    const std::string fieldName = tokenEnd == std::string::npos ? trimmed : trimmed.substr(0, tokenEnd);
+                    for (FieldTarget& target : targets)
+                    {
+                        if (!target.written && fieldName == target.name)
+                        {
+                            const std::string indent = lines[i].substr(0, firstNonSpace);
+                            lines[i] = indent + target.name + " " + FormatCombatNumber(target.value);
+                            target.written = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            for (const char c : stripped)
+            {
+                if (c == '{') ++depth;
+                else if (c == '}') --depth;
+            }
+
+            if (inCharacterBlock)
+            {
+                if (depth > characterHeaderDepth)
+                {
+                    enteredCharacterBody = true;
+                }
+                else if (enteredCharacterBody && depth == characterHeaderDepth)
+                {
+                    break; // Character block closed - nothing left to find.
+                }
+            }
+        }
+
+        if (!foundCharacter)
+        {
+            Foundation::Log::Write(Severity::Error, "MoveTable", "SaveCharacterToFile: no 'character' block in '%s'", filePath.c_str());
+            return false;
+        }
+        bool allWritten = true;
+        for (const FieldTarget& target : targets)
+        {
+            if (!target.written)
+            {
+                Foundation::Log::Write(
+                    Severity::Error, "MoveTable", "SaveCharacterToFile: no '%s' field line to rewrite in '%s'", target.name,
+                    filePath.c_str());
+                allWritten = false;
+            }
+        }
+        if (!allWritten)
+        {
+            return false;
+        }
+
+        std::ofstream out(filePath, std::ios::binary | std::ios::trunc);
+        if (!out.is_open())
+        {
+            Foundation::Log::Write(Severity::Error, "MoveTable", "SaveCharacterToFile: failed to open '%s' for writing", filePath.c_str());
+            return false;
+        }
+        for (const std::string& outLine : lines)
+        {
+            out << outLine << "\n";
+        }
+        out.close();
+
+        Foundation::Log::Write(Severity::Info, "MoveTable", "SaveCharacterToFile: saved to '%s'", filePath.c_str());
         return true;
     }
 }

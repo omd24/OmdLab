@@ -29,6 +29,7 @@
 #include <DirectXMath.h>
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <entt.hpp>
 #include <filesystem>
@@ -95,21 +96,30 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
         OMD_ASSERT(found, "states.combat is missing expected state '%s'", expectedState);
     }
 
-    // This character's own moveset. modelDirectory duplicates the (still-hardcoded for now)
-    // kCharacterDirectory constant below - collapsed into one source of truth once
-    // CharacterDefinition actually drives character loading later in this same pass.
-    Game::CharacterDefinition characterDefinition;
-    characterDefinition.modelDirectory = "data/characters/polyone_stick_man";
-    // Named (not just a load-site literal) since the hitbox-tuning debug tool's "Save" button
-    // later needs the same path to write back to.
+    // This character - identity, stats, per-asset render corrections, and (via the "character"
+    // block's own "moves" field) its moveset - all from one file. modelDirectory is set to that
+    // file's own containing directory, so the whole character folder is relocatable.
+    constexpr const char* kCharacterFilePath = "data/characters/polyone_stick_man/character.combat";
+    // Still named separately: the hitbox-tuning debug tool's "Save" button writes back to this
+    // exact file, and character.combat only references it by a directory-relative name.
     constexpr const char* kMovesFilePath = "data/characters/polyone_stick_man/moves.combat";
+    Game::CharacterDefinition characterDefinition;
     {
-        Game::CombatDsl::CombatFile movesFile;
-        const bool movesLoaded = Game::CombatDsl::LoadCombatFile(kMovesFilePath, movesFile);
-        OMD_ASSERT(movesLoaded, "Failed to load moves.combat");
-        const bool built = Game::BuildMoveTable(std::move(movesFile), characterDefinition.moveTable);
-        OMD_ASSERT(built, "Failed to build MoveTable from moves.combat");
+        const bool loaded = Game::LoadCharacterDefinition(kCharacterFilePath, characterDefinition);
+        OMD_ASSERT(loaded, "Failed to load character.combat");
+        // character.combat and the code reading these fields are independently editable - a
+        // missing/renamed field should fail loudly here, not silently zero out later.
+        OMD_ASSERT(!characterDefinition.displayName.empty(), "character.combat has no 'name'");
+        OMD_ASSERT(!characterDefinition.modelFile.empty(), "character.combat has no 'model'");
+        OMD_ASSERT(characterDefinition.stats.maxHealth > 0, "character.combat stats.maxHealth must be > 0");
     }
+    Foundation::Log::Write(
+        Foundation::Log::Severity::Info, "Game",
+        "Loaded character '%s': model=%s/%s health=%d walk=%.2f run=%.2f jump=%.2f groundingOffsetY=%.3f koDrop=%.2f frames[%u..%u]",
+        characterDefinition.displayName.c_str(), characterDefinition.modelDirectory.c_str(), characterDefinition.modelFile.c_str(),
+        characterDefinition.stats.maxHealth, characterDefinition.stats.walkSpeed, characterDefinition.stats.runSpeed,
+        characterDefinition.stats.jumpSpeed, characterDefinition.groundingOffsetY, characterDefinition.koDropOffsetY,
+        characterDefinition.koDropStartFrame, characterDefinition.koDropEndFrame);
     for (const Game::MoveDefinition& move : characterDefinition.moveTable.moves)
     {
         Foundation::Log::Write(
@@ -126,47 +136,37 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
 
     // Character asset, currently rendered in bind pose. Engine's connective resource layer
     // does the Asset-CPU-data-to-Renderer-GPU-resource translation, the same generic path the
-    // local test scene below also goes through.
-    constexpr const char* kCharacterDirectory = "data/characters/polyone_stick_man";
+    // local test scene below also goes through. Directory + file both come from character.combat
+    // now (modelDirectory is its own folder, modelFile the "model" field).
+    const std::string characterModelPath = characterDefinition.modelDirectory + "/" + characterDefinition.modelFile;
     Asset::Model characterModel;
     std::vector<Renderer::SkinnedMeshDrawItem> characterDrawItems;
     // The dummy fighter's own definition - a separate CharacterDefinition, not aliased to the
     // player's, since MoveSource::moveTable is a raw pointer into a CharacterDefinition's own
     // moveTable address; sharing the player's would point the dummy's MoveSource at the
-    // player's real move table. moveTable is deliberately left empty (no moves.combat load) -
-    // that's the entire mechanism behind "no AI, never attacks": SelectMove over an empty table
-    // always returns nullopt, so Attack can never fire for this entity, with zero new branching
-    // anywhere else.
+    // player's real move table. Loaded from the same character.combat as the player (it IS the
+    // same character - same model, stats, and render corrections), then its moveTable.moves is
+    // cleared: an empty move table is the entire mechanism behind "no AI, never attacks"
+    // (SelectMove over an empty table always returns nullopt, so Attack can never fire), with
+    // zero new branching anywhere else. The one hardcoded "punish" move below is the sole,
+    // deliberate exception.
     Game::CharacterDefinition dummyDefinition;
-    std::vector<Renderer::SkinnedMeshDrawItem> dummyDrawItems;
-    if (Asset::ImportGltf("data/characters/polyone_stick_man/StickMan.glb", characterModel))
     {
-        // Correction for this specific source file: Sketchfab's FBX-to-glTF conversion wraps
-        // the whole scene in a node (visible in the imported hierarchy as a node named after
-        // the original FBX's hash) carrying a 0.01 unit-conversion scale, which collapses the
-        // character down to world-space centimeter scale when imported standalone. Not
-        // something Engine's generic connective resource layer can detect or correct on its
-        // own (a legitimately tiny model is indistinguishable from this from the geometry
-        // alone) - a caller-known correction for this asset, per rootTransform's own contract.
-        // Stored on characterDefinition (not just a local here) so both FighterState.cpp's
-        // bone-attached-hitbox lookup and the per-frame render update below (tick loop) read
-        // the exact same source rather than a second hand-copied constant.
-        DirectX::XMStoreFloat4x4(&characterDefinition.assetCorrection, DirectX::XMMatrixScaling(100.0f, 100.0f, 100.0f));
-        // This character's own source asset was authored facing along Z (front/back toward a
-        // camera positioned there), but every other system in this game (ground plane,
-        // movement, the default camera) already assumes a 2D side view - camera looking down
-        // +Z, X the screen-horizontal gameplay axis. Rotate 90 degrees so its profile faces
-        // that camera instead - see CharacterDefinition::facingCorrectionRadians's own comment
-        // for why this is a second, separate correction from assetCorrection above, not folded
-        // into it (and why it's applied per-frame below rather than baked into rootTransform
-        // here alongside assetCorrection).
-        characterDefinition.facingCorrectionRadians = DirectX::XM_PIDIV2;
-
-        // Only assetCorrection bakes into the vertex data here - the entity's own Transform is
-        // still {0,0,0}/identity at this point (nothing has moved yet), and facingCorrection is
-        // deliberately applied per-frame instead (see the render loop's own comment on why).
+        const bool dummyLoaded = Game::LoadCharacterDefinition(kCharacterFilePath, dummyDefinition);
+        OMD_ASSERT(dummyLoaded, "Failed to load character.combat for the dummy fighter");
+        dummyDefinition.moveTable.moves.clear();
+    }
+    std::vector<Renderer::SkinnedMeshDrawItem> dummyDrawItems;
+    if (Asset::ImportGltf(characterModelPath.c_str(), characterModel))
+    {
+        // assetCorrection (the 0.01-unit-scale undo) and facingCorrectionRadians (the +Z-facing
+        // -> side-profile turn) were both filled by LoadCharacterDefinition from character.combat's
+        // "correction" block - see that file for why this asset needs each. Only assetCorrection
+        // bakes into the vertex data here; the entity's own Transform is still {0,0,0}/identity
+        // at this point (nothing has moved yet), and facingCorrection is deliberately applied
+        // per-frame instead (see the render loop's own comment on why).
         const DirectX::XMMATRIX assetCorrection = DirectX::XMLoadFloat4x4(&characterDefinition.assetCorrection);
-        characterDrawItems = Engine::CreateSkinnedMeshDrawItems(characterModel, kCharacterDirectory, assetCorrection);
+        characterDrawItems = Engine::CreateSkinnedMeshDrawItems(characterModel, characterDefinition.modelDirectory, assetCorrection);
         if (!characterDrawItems.empty())
         {
             registry.emplace<Engine::SkinnedRenderable>(characterEntity, Engine::SkinnedRenderable{ &characterDrawItems[0] });
@@ -176,16 +176,13 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
         // the real imported model, so this is the earliest point it can run.
         Game::ResolveHitboxJoints(characterModel, characterDefinition.moveTable);
 
-        // Dummy shares the player's own import quirks (same source asset) but gets its own
-        // CharacterDefinition instance (see its own declaration above) and its own GPU-backed
-        // draw item instance - CreateSkinnedMeshDrawItems's own persistent per-instance world/
-        // bone-palette buffers are exactly why a second real fighter needs a second call here,
-        // not a shared draw item (reusing one buffer across items was a real historical bug -
-        // see StaticMeshDrawItem's own comment).
-        dummyDefinition.stats = characterDefinition.stats;
-        dummyDefinition.assetCorrection = characterDefinition.assetCorrection;
-        dummyDefinition.facingCorrectionRadians = characterDefinition.facingCorrectionRadians;
-        dummyDrawItems = Engine::CreateSkinnedMeshDrawItems(characterModel, kCharacterDirectory, assetCorrection);
+        // Dummy already carries its own copy of every scalar field (loaded from the same
+        // character.combat above), but needs its own GPU-backed draw item instance -
+        // CreateSkinnedMeshDrawItems's own persistent per-instance world/bone-palette buffers
+        // are exactly why a second real fighter needs a second call here, not a shared draw item
+        // (reusing one buffer across items was a real historical bug - see StaticMeshDrawItem's
+        // own comment).
+        dummyDrawItems = Engine::CreateSkinnedMeshDrawItems(characterModel, dummyDefinition.modelDirectory, assetCorrection);
 
         // One hardcoded "punish" move for the "Block then punish" AI preset (debugSectionUI/
         // tick loop below) - not authored in a .combat file, same "construct a MoveDefinition
@@ -266,9 +263,13 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     // A first estimate of the character's body extents (feet at Transform.position, ~1.8-unit
     // standing height) - no per-state hurtbox profile exists yet, so this one box is always
     // active regardless of pose. Checked visually against the "Collision debug draw" toggle
-    // below, not just guessed and left unverified.
+    // below, not just guessed and left unverified. offset.y carries groundingOffsetY too, so the
+    // body volume drops with the rendered mesh (see CharacterDefinition::groundingOffsetY) -
+    // baked in here at startup, so a live groundingOffsetY tweak needs a restart to show up in
+    // this box (the mesh render and bone-attached hitboxes both read it live every frame/tick).
     registry.emplace<Engine::Hurtbox>(
-        characterEntity, Engine::Hurtbox{ { Engine::CollisionBox{ { 0.0f, 0.9f, 0.0f }, { 0.35f, 0.9f, 0.25f } } } });
+        characterEntity,
+        Engine::Hurtbox{ { Engine::CollisionBox{ { 0.0f, 0.9f + characterDefinition.groundingOffsetY, 0.0f }, { 0.35f, 0.9f, 0.25f } } } });
 
     registry.emplace<Game::FighterState>(characterEntity);
     registry.emplace<Game::Health>(
@@ -296,7 +297,8 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
         }
     }
     registry.emplace<Engine::Hurtbox>(
-        dummyEntity, Engine::Hurtbox{ { Engine::CollisionBox{ { 0.0f, 0.9f, 0.0f }, { 0.35f, 0.9f, 0.25f } } } });
+        dummyEntity,
+        Engine::Hurtbox{ { Engine::CollisionBox{ { 0.0f, 0.9f + dummyDefinition.groundingOffsetY, 0.0f }, { 0.35f, 0.9f, 0.25f } } } });
     registry.emplace<Game::FighterState>(dummyEntity);
     registry.emplace<Game::Health>(dummyEntity, Game::Health{ dummyDefinition.stats.maxHealth, dummyDefinition.stats.maxHealth });
     // Never actually dereferenced (dummyDefinition.moveTable is always empty, so the dummy can
@@ -477,6 +479,19 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     // continuously-looping preview. PreviewMoveHitbox itself is unaffected either way (it always
     // just renders whatever hitboxTuningFrameCounter currently holds).
     bool hitboxTuningPaused = false;
+
+    // "Character" tuning panel state (debugSectionUI below). groundingOffsetY / koDropOffsetY
+    // sliders bind straight to characterDefinition (1:1 with character.combat). The two KO frame
+    // sliders present RAW clip frames - characterDefinition stores them already divided by
+    // kCombatSpeedMultiplier (see BuildCharacterDefinition), so these UI ints are seeded by
+    // multiplying that back up, edited raw, then scaled back down into both definitions on
+    // change, and passed raw to SaveCharacterToFile. Edits are memory-only until "Save" is
+    // clicked, same contract as the hitbox tool.
+    int koDropStartFrameRawUI =
+        static_cast<int>(std::lround(static_cast<float>(characterDefinition.koDropStartFrame) * Game::kCombatSpeedMultiplier));
+    int koDropEndFrameRawUI =
+        static_cast<int>(std::lround(static_cast<float>(characterDefinition.koDropEndFrame) * Game::kCombatSpeedMultiplier));
+    std::string characterTuningSaveMessage;
 
     // Data-driven, hot-reloaded (see the polling below) - MakeDefaultFighterBindings() is only
     // the fallback for a missing/malformed file, never itself edited to rebind anything anymore.
@@ -770,7 +785,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
         // Transform/ClipPlayback/draw item/facing correction. advanceManually is player-only
         // (see manualClipOverride's own declaration) - false for the dummy, whose
         // playbackTimeSeconds is always frame-count-driven by UpdateFighterState instead.
-        auto updateFighterRender = [&](entt::entity entity, float facingCorrectionRadians, bool advanceManually)
+        auto updateFighterRender = [&](entt::entity entity, float facingCorrectionRadians, float groundingOffsetY, bool advanceManually)
         {
             if (characterSkin == nullptr || characterModel.clips.empty() || !registry.all_of<Engine::SkinnedRenderable>(entity))
             {
@@ -788,10 +803,16 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
             // NOT baked into vertex data the same way (kept out deliberately so it stays a single
             // source of truth alongside the live Transform below, and to match FighterState.cpp's
             // bone-attached hitbox lookup, which applies it the same way rather than assuming
-            // it's pre-baked).
+            // it's pre-baked). groundingOffsetY is a world-space Y translate applied outermost
+            // (row-vector convention: rightmost factor = last applied), seating this asset's feet
+            // on the Y=0 ground independent of facing or the live Transform - see
+            // CharacterDefinition::groundingOffsetY. FighterState.cpp's ResolveHitboxOffset adds
+            // the same shift so bone-attached hitboxes drop with the mesh.
             {
                 const DirectX::XMMATRIX facingCorrection = DirectX::XMMatrixRotationY(facingCorrectionRadians);
-                const DirectX::XMMATRIX worldTransform = facingCorrection * Engine::ComputeWorldMatrix(registry.get<Engine::Transform>(entity));
+                const DirectX::XMMATRIX groundingOffset = DirectX::XMMatrixTranslation(0.0f, groundingOffsetY, 0.0f);
+                const DirectX::XMMATRIX worldTransform =
+                    facingCorrection * Engine::ComputeWorldMatrix(registry.get<Engine::Transform>(entity)) * groundingOffset;
                 DirectX::XMFLOAT4X4 worldForGpu;
                 DirectX::XMStoreFloat4x4(&worldForGpu, DirectX::XMMatrixTranspose(worldTransform));
                 Renderer::Buffer::Update(drawItem.worldBuffer, &worldForGpu, sizeof(worldForGpu));
@@ -824,8 +845,8 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
             (registry.get<Game::FighterState>(characterEntity).facingRight ? 0.0f : DirectX::XM_PI);
         const float dummyFacingRadians =
             dummyDefinition.facingCorrectionRadians + (registry.get<Game::FighterState>(dummyEntity).facingRight ? 0.0f : DirectX::XM_PI);
-        updateFighterRender(characterEntity, playerFacingRadians, manualClipOverride);
-        updateFighterRender(dummyEntity, dummyFacingRadians, /*advanceManually*/ false);
+        updateFighterRender(characterEntity, playerFacingRadians, characterDefinition.groundingOffsetY, manualClipOverride);
+        updateFighterRender(dummyEntity, dummyFacingRadians, dummyDefinition.groundingOffsetY, /*advanceManually*/ false);
 
         // Shadow discs track their fighter's current X/Z every frame and fade with jump
         // height (Y) - see FighterShadow.h's own comment.
@@ -1089,6 +1110,67 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
                             ImGui::TextDisabled("%s", hitboxTuningSaveMessage.c_str());
                         }
                     }
+                }
+            }
+
+            // Per-asset placement tuning (character.combat's "correction" / "ko" blocks). Edits
+            // are live in memory on both fighters; "Save" writes them back via
+            // Game::SaveCharacterToFile, same memory-only-until-clicked contract as the hitbox
+            // tool. The Hurtbox is startup-baked from groundingOffsetY, so its debug-draw box
+            // won't follow the slider until a restart (mesh + bone-attached hitboxes do follow).
+            ImGui::SeparatorText("Character");
+            {
+                bool characterTuningChanged = false;
+                if (ImGui::SliderFloat("Grounding offset Y", &characterDefinition.groundingOffsetY, -0.6f, 0.6f, "%.3f"))
+                {
+                    dummyDefinition.groundingOffsetY = characterDefinition.groundingOffsetY;
+                    characterTuningChanged = true;
+                }
+
+                if (ImGui::SliderFloat("KO drop offset Y", &characterDefinition.koDropOffsetY, -1.5f, 0.0f, "%.3f"))
+                {
+                    dummyDefinition.koDropOffsetY = characterDefinition.koDropOffsetY;
+                    characterTuningChanged = true;
+                }
+                // Raw clip frames - rescaled into both definitions' speed-scaled runtime fields
+                // on any change (see koDropStartFrameRawUI's own declaration).
+                bool koFramesChanged = ImGui::SliderInt("KO drop start frame", &koDropStartFrameRawUI, 0, 90);
+                koFramesChanged |= ImGui::SliderInt("KO drop end frame", &koDropEndFrameRawUI, 0, 90);
+                if (koFramesChanged)
+                {
+                    const float invSpeed = 1.0f / Game::kCombatSpeedMultiplier;
+                    characterDefinition.koDropStartFrame =
+                        static_cast<uint32_t>(std::lround(static_cast<float>(koDropStartFrameRawUI) * invSpeed));
+                    characterDefinition.koDropEndFrame =
+                        static_cast<uint32_t>(std::lround(static_cast<float>(koDropEndFrameRawUI) * invSpeed));
+                    dummyDefinition.koDropStartFrame = characterDefinition.koDropStartFrame;
+                    dummyDefinition.koDropEndFrame = characterDefinition.koDropEndFrame;
+                    characterTuningChanged = true;
+                }
+                if (characterTuningChanged)
+                {
+                    characterTuningSaveMessage.clear();
+                }
+
+                // KO is otherwise awkward to trigger on demand - drop the player's HP to 0 and
+                // the shared "healthDepleted" transition takes them to KO next tick.
+                if (ImGui::Button("KO player now"))
+                {
+                    registry.get<Game::Health>(characterEntity).current = 0;
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Save to character.combat"))
+                {
+                    // Slider-bounded to [0, 90], so these are always non-negative.
+                    const bool saved = Game::SaveCharacterToFile(
+                        kCharacterFilePath, characterDefinition.groundingOffsetY, characterDefinition.koDropOffsetY,
+                        static_cast<uint32_t>(koDropStartFrameRawUI), static_cast<uint32_t>(koDropEndFrameRawUI));
+                    characterTuningSaveMessage = saved ? "Saved." : "Save failed - see logs/omdlab.log.";
+                }
+                if (!characterTuningSaveMessage.empty())
+                {
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("%s", characterTuningSaveMessage.c_str());
                 }
             }
 

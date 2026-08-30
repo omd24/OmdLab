@@ -175,9 +175,20 @@ namespace
                 {
                     file.moves.push_back(ParseMoveDecl());
                 }
+                else if (PeekIsIdent("character"))
+                {
+                    if (file.character.has_value())
+                    {
+                        Fail("duplicate 'character' declaration");
+                    }
+                    else
+                    {
+                        file.character = ParseCharacterDecl();
+                    }
+                }
                 else
                 {
-                    Fail("expected 'state' or 'move'");
+                    Fail("expected 'state', 'move', or 'character'");
                 }
             }
             return file;
@@ -440,6 +451,41 @@ namespace
             return move;
         }
 
+        // characterDecl has no name identifier (unlike state/move) - a file carries at most one,
+        // so there is nothing to disambiguate. Its three recognized sub-blocks reuse
+        // ParseFieldBlock verbatim, exactly as hitbox/sfx/vfx do inside a moveDecl.
+        Game::CombatDsl::CharacterDecl ParseCharacterDecl()
+        {
+            Game::CombatDsl::CharacterDecl character;
+            ExpectIdent("character");
+            ExpectLBrace();
+            while (ok && !AtRBraceOrEnd())
+            {
+                if (PeekIsIdent("stats"))
+                {
+                    character.stats = ParseFieldBlock("stats");
+                }
+                else if (PeekIsIdent("correction"))
+                {
+                    character.correction = ParseFieldBlock("correction");
+                }
+                else if (PeekIsIdent("ko"))
+                {
+                    character.ko = ParseFieldBlock("ko");
+                }
+                else if (Peek().kind == TokenKind::Ident)
+                {
+                    character.fields.push_back(ParseFieldAssignment());
+                }
+                else
+                {
+                    Fail("expected a field, 'stats', 'correction', or 'ko'");
+                }
+            }
+            ExpectRBrace();
+            return character;
+        }
+
         Game::CombatDsl::Cancel ParseCancelDecl()
         {
             Game::CombatDsl::Cancel cancel;
@@ -580,9 +626,9 @@ namespace Game::CombatDsl
     void RunSelfTest()
     {
         // A small hand-written example exercising every grammar construct (state/transition,
-        // move/cancel, require-as-sugar, nested all/any/not, comparisons) - not real game
-        // content, just enough to catch a lexer/parser/evaluator regression before it reaches
-        // real .combat content.
+        // move/cancel, require-as-sugar, nested all/any/not, comparisons, character block with
+        // all three sub-blocks) - not real game content, just enough to catch a lexer/parser/
+        // evaluator regression before it reaches real .combat content.
         constexpr const char* kSource = R"(
             state Idle
             {
@@ -633,6 +679,31 @@ namespace Game::CombatDsl
                     frameEnd 8
                 }
             }
+
+            character
+            {
+                name "Test Dummy"
+                moves "moves.combat"
+
+                stats
+                {
+                    maxHealth 120
+                    walkSpeed 2.5
+                }
+
+                correction
+                {
+                    assetScale 100
+                    groundingOffsetY -0.15
+                }
+
+                ko
+                {
+                    dropOffsetY -0.9
+                    dropStartFrame 5
+                    dropEndFrame 28
+                }
+            }
         )";
 
         CombatFile file;
@@ -644,6 +715,21 @@ namespace Game::CombatDsl
         OMD_ASSERT(file.moves[0].cancels.size() == 1, "CombatDsl self-test: expected 1 cancel");
         OMD_ASSERT(file.moves[0].hitboxes.size() == 1, "CombatDsl self-test: expected 1 hitbox sub-block");
         OMD_ASSERT(file.moves[0].fields.size() == 2, "CombatDsl self-test: expected 2 fields (damage, startup)");
+
+        // The character block: present, top-level fields plus all three sub-blocks populated.
+        OMD_ASSERT(file.character.has_value(), "CombatDsl self-test: expected a character block");
+        OMD_ASSERT(file.character->fields.size() == 2, "CombatDsl self-test: expected 2 character fields (name, moves)");
+        OMD_ASSERT(file.character->stats.size() == 2, "CombatDsl self-test: expected 2 stats fields");
+        OMD_ASSERT(file.character->correction.size() == 2, "CombatDsl self-test: expected 2 correction fields");
+        OMD_ASSERT(file.character->ko.size() == 3, "CombatDsl self-test: expected 3 ko fields");
+        OMD_ASSERT(
+            file.character->fields[0].first == "name" && !file.character->fields[0].second.isNumber &&
+                file.character->fields[0].second.stringValue == "Test Dummy",
+            "CombatDsl self-test: character 'name' field did not round-trip");
+        OMD_ASSERT(
+            file.character->ko[0].first == "dropOffsetY" && file.character->ko[0].second.isNumber &&
+                file.character->ko[0].second.numberValue < 0.0 && file.character->ko[0].second.numberValue > -1.0,
+            "CombatDsl self-test: character ko 'dropOffsetY' field did not round-trip (expected a small negative)");
 
         // Evaluate the "Attacking" transition's condition (require lightPressed; require frame >= 2)
         // against a context designed to prove both the flag check and the numeric comparison.

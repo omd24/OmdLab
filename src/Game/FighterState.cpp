@@ -111,9 +111,14 @@ namespace
     // gaining +180 degrees below) - a hitbox's small authored "reach further out this way"
     // refinement needs to point the mirrored direction too, or it would keep pushing toward the
     // same absolute world side regardless of which way the character is actually turned.
+    // groundingOffsetY: the same world-space Y shift the visible mesh is drawn with (see
+    // CharacterDefinition::groundingOffsetY / main.cpp's updateFighterRender) - added to every
+    // returned offset here so a bone-attached hitbox drops with the mesh instead of floating at
+    // the un-shifted skeleton height. Applied to both the joint-attached and the root-relative
+    // fallback path, since the mesh shift is unconditional.
     DirectX::XMFLOAT3 ResolveHitboxOffset(
-        const Game::MoveHitboxDef& hitboxDef, float baseFacingCorrectionRadians, bool facingRight, const Asset::Model& model,
-        const std::vector<Asset::Clip>& availableClips, const std::string& clipName, uint32_t framesElapsed,
+        const Game::MoveHitboxDef& hitboxDef, float baseFacingCorrectionRadians, bool facingRight, float groundingOffsetY,
+        const Asset::Model& model, const std::vector<Asset::Clip>& availableClips, const std::string& clipName, uint32_t framesElapsed,
         const Engine::Transform& entityTransform)
     {
         if (hitboxDef.resolvedJointIndex < 0)
@@ -123,6 +128,7 @@ namespace
             {
                 offset.x = -offset.x;
             }
+            offset.y += groundingOffsetY;
             return offset;
         }
 
@@ -131,7 +137,9 @@ namespace
         {
             // Shouldn't happen - SetClip already resolved this exact same clip name this same
             // tick. Fail soft rather than crash: root-relative is a worse-but-safe placement.
-            return hitboxDef.box.offset;
+            DirectX::XMFLOAT3 offset = hitboxDef.box.offset;
+            offset.y += groundingOffsetY;
+            return offset;
         }
         const Asset::Clip& clip = availableClips[static_cast<size_t>(clipIndex)];
         float t = static_cast<float>(framesElapsed) * Engine::FixedTimestepAccumulator::kFixedDeltaSeconds;
@@ -172,7 +180,7 @@ namespace
         // instead of a fixed authored number.
         return DirectX::XMFLOAT3{
             jointWorldPos.x - entityTransform.position.x + mirroredOffsetX,
-            jointWorldPos.y - entityTransform.position.y + hitboxDef.box.offset.y,
+            jointWorldPos.y - entityTransform.position.y + hitboxDef.box.offset.y + groundingOffsetY,
             jointWorldPos.z - entityTransform.position.z + hitboxDef.box.offset.z,
         };
     }
@@ -280,6 +288,30 @@ namespace
         else if (state.currentState == "KO")
         {
             clipName = "ko";
+            // Settle-to-ground ramp. The retargeted "ko" clip keeps its root joint at standing
+            // hip height through the whole fall, so without this the body finishes lying in
+            // mid-air. Ease position.y from 0 to koDropOffsetY across framesInState in
+            // [koDropStartFrame, koDropEndFrame] (both already speed-scaled at load), then hold
+            // there - set directly like Jump's own position.y, overriding the grounded-by-
+            // default reset above. koDropOffsetY == 0 leaves KO untouched; an empty/inverted
+            // window degrades to an instant step at koDropStartFrame.
+            if (characterDefinition.koDropOffsetY != 0.0f)
+            {
+                const uint32_t f = state.framesInState;
+                float progress = 1.0f;
+                if (f <= characterDefinition.koDropStartFrame)
+                {
+                    progress = 0.0f;
+                }
+                else if (f < characterDefinition.koDropEndFrame)
+                {
+                    const float span =
+                        static_cast<float>(characterDefinition.koDropEndFrame - characterDefinition.koDropStartFrame);
+                    const float x = static_cast<float>(f - characterDefinition.koDropStartFrame) / span;
+                    progress = x * x * (3.0f - 2.0f * x); // smoothstep
+                }
+                transform.position.y = characterDefinition.koDropOffsetY * progress;
+            }
         }
 
         if (moveUnitsPerSecond != 0.0f)
@@ -309,8 +341,8 @@ namespace
             const int32_t moveIndex = characterDefinition.moveTable.IndexOf(activeMove->id);
             Engine::CollisionBox worldBox = activeHitbox->box;
             worldBox.offset = ResolveHitboxOffset(
-                *activeHitbox, characterDefinition.facingCorrectionRadians, state.facingRight, characterModel, availableClips,
-                activeMove->animationClip, state.framesInState, transform);
+                *activeHitbox, characterDefinition.facingCorrectionRadians, state.facingRight, characterDefinition.groundingOffsetY,
+                characterModel, availableClips, activeMove->animationClip, state.framesInState, transform);
             registry.emplace_or_replace<Engine::Hitbox>(entity, Engine::Hitbox{ worldBox, static_cast<uint32_t>(moveIndex) });
         }
         else if (registry.all_of<Engine::Hitbox>(entity))

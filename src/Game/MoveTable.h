@@ -87,9 +87,14 @@ namespace Game
     };
 
     // A fighter entity is instantiated FROM this, never hand-assembled per-character in code.
+    // Populated by LoadCharacterDefinition from a character's own <name>/character.combat file
+    // (a CombatDsl "character" block); only the AI-preset "punish" move is still stitched in by
+    // hand at the main.cpp call site.
     struct CharacterDefinition
     {
-        std::string modelDirectory;
+        std::string modelDirectory; // Set to character.combat's own containing directory by LoadCharacterDefinition.
+        std::string modelFile;      // Skinned-mesh filename within modelDirectory (character block "model" field).
+        std::string displayName;    // Human-readable name (character block "name" field) - UI/debug only.
         CharacterStats stats;
         MoveTable moveTable;
         // Corrective transform this character's specific source asset's MESH VERTEX data needs
@@ -119,8 +124,30 @@ namespace Game
         // profile. Applied everywhere assetCorrection's scale is NOT (both mesh render AND
         // bone-attached hitbox lookups - see ResolveHitboxOffset), since unlike the scale quirk
         // this must move the skeleton too, or a hitbox would visibly detach from the mesh it's
-        // meant to track. 0 (no correction) by default.
+        // meant to track. 0 (no correction) by default. Authored in character.combat as
+        // "facingDegrees" (degrees, converted on load) since degrees read better by hand.
         float facingCorrectionRadians = 0.0f;
+
+        // Constant world-space Y translate seating this asset's feet on the Y=0 ground plane -
+        // the model's origin sits above the soles, so every pose renders lifted by the same gap.
+        // Applied wherever facingCorrectionRadians is (render world matrix + bone-attached hitbox
+        // lookup), NOT to Transform.position - "position.y == 0 means grounded" stays true as a
+        // gameplay contract; this is a render/collision-space fix-up for one asset's authoring.
+        // character.combat "correction" block, 0 (no offset) by default.
+        float groundingOffsetY = 0.0f;
+
+        // KO settle-to-ground ramp. The retargeted "ko" clip animates the limbs through a fall
+        // while its root joint stays at standing hip height (the generic per-axis root-motion
+        // strip in the retarget pipeline removed the downward translation the knockdown needed),
+        // so the body ends the clip lying in mid-air. While in the KO state, Transform.position.y
+        // eases from 0 to koDropOffsetY across clip frames [koDropStartFrame, koDropEndFrame],
+        // then holds there for the rest of KO (the clip itself already freezes its final pose).
+        // koDropOffsetY == 0 (default) leaves KO untouched. Frame counts are pre-scaled by
+        // 1/kCombatSpeedMultiplier on load, same as MoveDefinition's own frame fields, since the
+        // "ko" clip plays back at that same sped-up rate. character.combat "ko" block.
+        float koDropOffsetY = 0.0f;
+        uint32_t koDropStartFrame = 0;
+        uint32_t koDropEndFrame = 0;
     };
 
     // Maps a parsed CombatFile's stringly-typed MoveDecls onto real MoveDefinition fields.
@@ -129,6 +156,27 @@ namespace Game
     // parsed file by rvalue reference since it consumes (moves out of) each MoveDecl's cancel
     // list rather than copying it - CombatDsl::Condition is move-only.
     bool BuildMoveTable(CombatDsl::CombatFile&& parsedFile, MoveTable& outTable);
+
+    // Maps a parsed CombatDsl::CharacterDecl's stringly-typed fields onto a CharacterDefinition's
+    // typed ones: "name" -> displayName, "model" -> modelFile, the "stats" sub-block -> stats,
+    // "correction" -> assetCorrection (from "assetScale")/facingCorrectionRadians (from
+    // "facingDegrees")/groundingOffsetY, "ko" -> koDropOffsetY/koDropStartFrame/koDropEndFrame
+    // (the two frame fields scaled by 1/kCombatSpeedMultiplier here, matching BuildMoveTable's
+    // own frame-field scaling). Unknown fields are logged and skipped, same additive-authoring
+    // rule as BuildMoveTable. Does NOT touch modelDirectory or moveTable - those are the
+    // orchestrating LoadCharacterDefinition's job. The "moves" field is recognized but ignored
+    // here (LoadCharacterDefinition consumes it), so it doesn't log as unknown.
+    void BuildCharacterDefinition(const CombatDsl::CharacterDecl& decl, CharacterDefinition& outDefinition);
+
+    // The one entry point for loading a character: parses characterComatPath (a file with a
+    // "character" block), runs BuildCharacterDefinition, sets modelDirectory to that file's own
+    // containing directory, then loads + builds the moveset named by the block's "moves" field
+    // (resolved relative to the same directory). All-or-nothing, matching this project's other
+    // loaders: logs the reason and returns false on a missing/unparseable file, a missing
+    // "character" or "moves" field, or a MoveTable build failure - outDefinition is then left
+    // partially written and must not be used. Bone-attachment resolution (ResolveHitboxJoints)
+    // still happens separately at the call site, since it needs the imported model.
+    bool LoadCharacterDefinition(const std::string& characterCombatPath, CharacterDefinition& outDefinition);
 
     // One-time resolution of every hitbox's optional bone attachment (MoveHitboxDef::boneName)
     // from a name to a stable Asset::Model node index - called once at startup after both the
@@ -164,4 +212,16 @@ namespace Game
     bool SaveHitboxToFile(
         const std::string& filePath, const std::string& moveId, int32_t hitboxIndex, const Engine::CollisionBox& box,
         uint32_t frameStart, uint32_t frameEnd);
+
+    // The dev-tools "Character" panel's "Save" counterpart to SaveHitboxToFile: rewrites the
+    // "groundingOffsetY" line (correction block) and the "dropOffsetY"/"dropStartFrame"/
+    // "dropEndFrame" lines (ko block) of filePath's one "character" block in place, every other
+    // line - comments, stats, formatting - byte-for-byte untouched. No insert path (unlike
+    // SaveHitboxToFile's frameStart/frameEnd): character.combat always authors all four, so a
+    // missing target line is a hard failure that touches nothing. koDropStartFrameRaw/
+    // koDropEndFrameRaw are RAW clip frames - the caller multiplies the speed-scaled runtime
+    // values back up by kCombatSpeedMultiplier first, so the file keeps the numbers as authored.
+    bool SaveCharacterToFile(
+        const std::string& filePath, float groundingOffsetY, float koDropOffsetY, uint32_t koDropStartFrameRaw,
+        uint32_t koDropEndFrameRaw);
 }

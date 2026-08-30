@@ -2,6 +2,7 @@
 
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -20,7 +21,7 @@ namespace Game::CombatDsl
     //
     // Grammar (EBNF-ish):
     //   file            := declaration*
-    //   declaration     := stateDecl | moveDecl
+    //   declaration     := stateDecl | moveDecl | characterDecl
     //   stateDecl       := "state" IDENT "{" transitionDecl* "}"
     //   transitionDecl  := "transition" IDENT "{" conditionItem* "}"
     //   moveDecl        := "move" IDENT "{" moveBodyItem* "}"
@@ -29,6 +30,11 @@ namespace Game::CombatDsl
     //   hitboxDecl      := "hitbox" "{" fieldAssignment* "}"
     //   sfxDecl         := "sfx" "{" fieldAssignment* "}"
     //   vfxDecl         := "vfx" "{" fieldAssignment* "}"
+    //   characterDecl   := "character" "{" characterBodyItem* "}"
+    //   characterBodyItem := fieldAssignment | statsDecl | correctionDecl | koDecl
+    //   statsDecl       := "stats" "{" fieldAssignment* "}"
+    //   correctionDecl  := "correction" "{" fieldAssignment* "}"
+    //   koDecl          := "ko" "{" fieldAssignment* "}"
     //   fieldAssignment := IDENT (NUMBER | IDENT | STRING)
     //   conditionItem   := ["require"] conditionTerm
     //   conditionTerm   := conditionExpr | allBlock | anyBlock | notTerm
@@ -46,6 +52,11 @@ namespace Game::CombatDsl
     // body is implicitly OR'ed. "all"/"any"/"not" are therefore reserved at the start of a
     // conditionTerm - a flag/variable literally named one of those three would be unreachable,
     // an accepted limitation for a grammar this small (same spirit as "require" itself).
+    // Likewise "stats"/"correction"/"ko" are reserved at the start of a characterBodyItem - a
+    // top-level character field literally named one of those would be read as a sub-block open.
+    // A file carries at most one characterDecl; a second one is a parse error. characterDecl is
+    // a valid declaration in any .combat file, but only a character's own file authors one -
+    // states.combat / moves.combat simply never contain one.
 
     enum class ComparisonOp
     {
@@ -137,10 +148,31 @@ namespace Game::CombatDsl
         std::vector<FieldBlock> vfxCues;
     };
 
+    // A character's own identity/stat/correction data, authored in that character's .combat file
+    // alongside (or referencing) its moveset. Like hitbox/sfx/vfx, the three sub-blocks are
+    // anonymous, structurally identical bags of fieldAssignments (one FieldBlock each) - only
+    // which member a block lands in carries meaning. Kept stringly-typed here for the same
+    // reason MoveDecl is: this layer only parses shape, Game::MoveTable.cpp maps names onto real
+    // typed fields (and logs+skips unknown ones, keeping authoring additive).
+    //   fields     - top-level: name, model, moves (the moveset file to also load), ...
+    //   stats      - maxHealth, walkSpeed, runSpeed, jumpSpeed
+    //   correction - assetScale, facingDegrees, groundingOffsetY (per-asset render fix-ups)
+    //   ko         - dropOffsetY, dropStartFrame, dropEndFrame (KO settle-to-ground ramp)
+    struct CharacterDecl
+    {
+        FieldBlock fields;
+        FieldBlock stats;
+        FieldBlock correction;
+        FieldBlock ko;
+    };
+
     struct CombatFile
     {
         std::vector<StateDecl> states;
         std::vector<MoveDecl> moves;
+        // Present only when the parsed file authored a "character" block (a character's own
+        // file); nullopt for states.combat / moves.combat.
+        std::optional<CharacterDecl> character;
     };
 
     // Strict all-or-nothing parse (matches Asset::ImportGltf's own "fail loudly" convention) -
