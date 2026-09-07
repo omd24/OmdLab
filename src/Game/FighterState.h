@@ -64,6 +64,14 @@ namespace Game
         // fighter is currently walking/attacking, so crossups/jumping past an opponent don't
         // leave anyone facing backward.
         bool facingRight = true;
+        // Ticks this fighter's clocks stay frozen after a hit connects (impact hitstop /
+        // freeze-frame). Set on BOTH fighters the tick a hit lands, from the attacking move's
+        // own hitStopFrames. While > 0, UpdateFighterState decrements it and returns early that
+        // tick - no transitions evaluated, no frame counters advanced, the pose held on its
+        // current frame for both. 0 the rest of the time. Deliberately separate from
+        // pushbackRemaining below (which starts easing out only once this reaches 0, giving the
+        // standard "freeze, then knockback" order) and untouched by EnterState.
+        uint32_t hitStopRemaining = 0;
         // Signed world-X distance still left to apply from a push-back impulse, eased out
         // (a fraction applied per tick, decaying toward zero) rather than an instant teleport -
         // see UpdateFighterState's own comment on why. Set once at the moment HitStun is

@@ -1,13 +1,17 @@
 #include "MoveTable.h"
 
 #include "GameConstants.h"
+#include "Asset/Clip.h"
 #include "Asset/Model.h"
+#include "Engine/Animation.h"
 #include "Foundation/Log.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <fstream>
 #include <utility>
+#include <vector>
 
 namespace
 {
@@ -150,6 +154,32 @@ namespace Game
                 else if (name == "onBlockStun") move.onBlockStunFrames = static_cast<uint32_t>(value.numberValue);
                 else if (name == "damage") move.damage = static_cast<int32_t>(value.numberValue);
                 else if (name == "guardHeight") move.guardHeight = ParseGuardHeight(value.stringValue);
+                else if (name == "impact")
+                {
+                    if (value.isNumber)
+                    {
+                        move.impact = std::clamp(static_cast<float>(value.numberValue), 0.0f, 1.0f);
+                    }
+                    else
+                    {
+                        const std::string& v = value.stringValue;
+                        move.impact = (v == "none") ? 0.0f : (v == "light") ? 0.35f : (v == "heavy") ? 1.0f : 0.65f;
+                        if (v != "none" && v != "light" && v != "medium" && v != "heavy")
+                        {
+                            Foundation::Log::Write(
+                                Severity::Warning, "MoveTable", "move '%s': unknown impact '%s' - using medium", move.id.c_str(),
+                                v.c_str());
+                        }
+                    }
+                }
+                // Explicit per-field overrides - an escape hatch, not the normal authoring
+                // surface (see MoveDefinition / NOTES/COMBAT_GUIDE.md). Any of these left
+                // unauthored is derived by FinalizeMoveTiming / AnalyzeMoveTiming instead.
+                else if (name == "timingContact") move.timingContactFraction = static_cast<float>(value.numberValue);
+                else if (name == "timingWindup") move.timingWindupFraction = static_cast<float>(value.numberValue);
+                else if (name == "timingSnapFrames") move.timingSnapFrames = static_cast<uint32_t>(value.numberValue);
+                else if (name == "hitStop") move.hitStopFrames = static_cast<uint32_t>(value.numberValue);
+                else if (name == "lunge") move.lungeDistance = static_cast<float>(value.numberValue);
                 else Foundation::Log::Write(Severity::Warning, "MoveTable", "unknown field '%s' on move '%s'", name.c_str(), move.id.c_str());
             }
 
@@ -165,6 +195,14 @@ namespace Game
                 move.recoveryFrames = static_cast<uint32_t>(std::lround(static_cast<float>(move.recoveryFrames) * speedScale));
                 move.onHitStunFrames = static_cast<uint32_t>(std::lround(static_cast<float>(move.onHitStunFrames) * speedScale));
                 move.onBlockStunFrames = static_cast<uint32_t>(std::lround(static_cast<float>(move.onBlockStunFrames) * speedScale));
+                // Only an EXPLICITLY-authored game-feel tick count is 60Hz and needs the same
+                // lockstep rescale as startup/active/recovery. A field still at its sentinel is
+                // filled later by FinalizeMoveTiming directly in runtime-tick space, so it must
+                // not be touched here. The fractions/eases/distance are unitless regardless.
+                if (move.timingSnapFrames != MoveDefinition::kUnsetFrames)
+                    move.timingSnapFrames = static_cast<uint32_t>(std::lround(static_cast<float>(move.timingSnapFrames) * speedScale));
+                if (move.hitStopFrames != MoveDefinition::kUnsetFrames)
+                    move.hitStopFrames = static_cast<uint32_t>(std::lround(static_cast<float>(move.hitStopFrames) * speedScale));
             }
 
             for (const CombatDsl::FieldBlock& hitboxBlock : moveDecl.hitboxes)
@@ -323,6 +361,138 @@ namespace Game
                         move.id.c_str(), hitboxDef.boneName.c_str());
                 }
             }
+        }
+    }
+
+    void AnalyzeMoveTiming(const Asset::Model& model, const std::vector<Asset::Clip>& clips, MoveTable& moveTable)
+    {
+        for (MoveDefinition& move : moveTable.moves)
+        {
+            if (move.timingContactFraction >= 0.0f && move.timingWindupFraction >= 0.0f)
+            {
+                continue; // both pinned in the .combat file - nothing to detect
+            }
+            if (move.hitboxes.empty() || move.hitboxes[0].resolvedJointIndex < 0)
+            {
+                continue; // no bone to track - FinalizeMoveTiming supplies a fallback
+            }
+            const Asset::Clip* clip = nullptr;
+            for (const Asset::Clip& candidate : clips)
+            {
+                if (candidate.name == move.animationClip)
+                {
+                    clip = &candidate;
+                    break;
+                }
+            }
+            if (clip == nullptr || clip->durationSeconds <= 0.0f)
+            {
+                continue;
+            }
+
+            const size_t joint = static_cast<size_t>(move.hitboxes[0].resolvedJointIndex);
+            const int samples = std::clamp(static_cast<int>(std::lround(clip->durationSeconds * 60.0f)), 8, 96);
+            std::vector<float> extension(static_cast<size_t>(samples), 0.0f);
+            for (int i = 0; i < samples; ++i)
+            {
+                const float t = (static_cast<float>(i) / static_cast<float>(samples - 1)) * clip->durationSeconds;
+                const std::vector<DirectX::XMMATRIX> nodeWorld =
+                    Engine::EvaluateNodeWorldTransforms(model, DirectX::XMMatrixIdentity(), clip, t);
+                if (joint >= nodeWorld.size())
+                {
+                    break;
+                }
+                // Body centre = mean of every node's world-space origin at this frame. The
+                // tracked bone's distance from it is a direction-agnostic "how extended is this
+                // limb" signal: a punching hand and a kicking foot both reach away from it.
+                DirectX::XMVECTOR centre = DirectX::XMVectorZero();
+                for (const DirectX::XMMATRIX& m : nodeWorld)
+                {
+                    centre = DirectX::XMVectorAdd(centre, m.r[3]);
+                }
+                centre = DirectX::XMVectorScale(centre, 1.0f / static_cast<float>(nodeWorld.size()));
+                const DirectX::XMVECTOR limb = nodeWorld[joint].r[3];
+                extension[static_cast<size_t>(i)] =
+                    DirectX::XMVectorGetX(DirectX::XMVector3Length(DirectX::XMVectorSubtract(limb, centre)));
+            }
+
+            int strikeIndex = 0;
+            for (int i = 1; i < samples; ++i)
+            {
+                if (extension[static_cast<size_t>(i)] > extension[static_cast<size_t>(strikeIndex)])
+                {
+                    strikeIndex = i;
+                }
+            }
+            int coilIndex = 0;
+            for (int i = 1; i <= strikeIndex; ++i)
+            {
+                if (extension[static_cast<size_t>(i)] < extension[static_cast<size_t>(coilIndex)])
+                {
+                    coilIndex = i;
+                }
+            }
+
+            const float contact = static_cast<float>(strikeIndex) / static_cast<float>(samples - 1);
+            float windup = static_cast<float>(coilIndex) / static_cast<float>(samples - 1);
+            if (windup > contact - 0.06f)
+            {
+                windup = contact * 0.4f; // coil landed on/after the strike - degenerate, fall back
+            }
+            windup = std::clamp(windup, 0.02f, 0.9f);
+
+            if (move.timingContactFraction < 0.0f) move.timingContactFraction = contact;
+            if (move.timingWindupFraction < 0.0f) move.timingWindupFraction = windup;
+            Foundation::Log::Write(
+                Severity::Info, "MoveTable", "move '%s' auto-timing: windup=%.2f contact=%.2f (bone '%s', %d samples)",
+                move.id.c_str(), move.timingWindupFraction, move.timingContactFraction, move.hitboxes[0].boneName.c_str(), samples);
+        }
+    }
+
+    void FinalizeMoveTiming(MoveTable& moveTable)
+    {
+        for (MoveDefinition& move : moveTable.moves)
+        {
+            const bool explicitContact = move.timingContactFraction >= 0.0f;
+            float k = move.impact;
+            if (k < 0.0f && explicitContact)
+            {
+                k = 0.65f; // contact pinned by hand but no `impact` - treat the feel as medium
+            }
+            if (k <= 0.0f && !explicitContact)
+            {
+                move.timingCurveActive = false; // flat playback, exactly as a bare clip
+                continue;
+            }
+            if (k < 0.0f)
+            {
+                k = 0.0f;
+            }
+
+            // Curve shape: only the snap length. The wind-up and settle are smoothstep /
+            // smootherstep over the move's own startup / recovery budgets (WarpedClipSeconds) -
+            // nothing to tune. The old windupEase / recoverEase / holdFrames knobs are gone; the
+            // fields remain on MoveDefinition as parsed no-op overrides only.
+            if (move.timingSnapFrames == MoveDefinition::kUnsetFrames) move.timingSnapFrames = 3;
+
+            // Weight scales with `impact`. Already in runtime ticks / world units - NOT re-scaled
+            // by kCombatSpeedMultiplier (unlike an explicitly-authored value, which BuildMoveTable
+            // already rescaled from 60Hz). hitStop is the only hard freeze in the whole move, so
+            // it carries the "impact weight" on its own now that the animation never hard-stops.
+            if (move.hitStopFrames == MoveDefinition::kUnsetFrames)
+                move.hitStopFrames = static_cast<uint32_t>(std::lround(9.0f * k));
+            if (move.lungeDistance < 0.0f)
+                move.lungeDistance = 0.42f * k;
+
+            // Clip fractions: AnalyzeMoveTiming set these if it could; fall back otherwise.
+            if (move.timingContactFraction < 0.0f) move.timingContactFraction = 0.5f;
+            if (move.timingWindupFraction < 0.0f) move.timingWindupFraction = move.timingContactFraction * 0.4f;
+
+            move.timingCurveActive = true;
+            Foundation::Log::Write(
+                Severity::Info, "MoveTable", "move '%s' feel: impact=%.2f -> hitStop=%u lunge=%.2f (windup=%.2f contact=%.2f snap=%u)",
+                move.id.c_str(), k, move.hitStopFrames, move.lungeDistance, move.timingWindupFraction, move.timingContactFraction,
+                move.timingSnapFrames);
         }
     }
 

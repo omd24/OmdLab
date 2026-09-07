@@ -11,6 +11,7 @@
 namespace Asset
 {
     struct Model;
+    struct Clip;
 }
 
 namespace Game
@@ -63,6 +64,32 @@ namespace Game
         GuardHeight guardHeight = GuardHeight::Mid;
         std::vector<MoveHitboxDef> hitboxes;
         std::vector<CombatDsl::Cancel> cancels;
+
+        // --- Game-feel: ONE authored knob, everything else derived -------------------------
+        // A raw retargeted clip plays at one even speed for its whole length - sluggish and
+        // weightless next to any real fighting game. `impact` turns on a reshaped playback
+        // (eased wind-up -> snap to the strike pose -> brief frozen hold -> fast recovery) plus
+        // a contact freeze-frame and a forward step, ALL scaled by this one number.
+        //   authored in .combat as: impact none|light|medium|heavy   (or a raw 0..1)
+        //   -1 = not authored -> the clip plays flat, exactly as before any of this existed.
+        // This is the only game-feel field a move normally sets. See NOTES/COMBAT_GUIDE.md.
+        float impact = -1.0f;
+
+        // Everything below is DERIVED after load - from `impact` (Game::FinalizeMoveTiming) or
+        // auto-detected from the clip itself (Game::AnalyzeMoveTiming). Each stays at its
+        // sentinel unless a .combat file pins it explicitly, which is an escape hatch, not part
+        // of the normal authoring surface.
+        static constexpr uint32_t kUnsetFrames = 0xFFFFFFFFu;
+        float timingContactFraction = -1.0f;  // clip fraction of the strike pose (auto-detected from the hitbox bone)
+        float timingWindupFraction = -1.0f;   // clip fraction of the coiled pose (auto-detected)
+        uint32_t timingSnapFrames = kUnsetFrames;   // coil -> strike, in runtime ticks (default 3)
+        uint32_t hitStopFrames = kUnsetFrames;      // both fighters freeze on contact, runtime ticks
+        float lungeDistance = -1.0f;                // forward world-units, decelerating to a plant at the strike
+
+        // Set by FinalizeMoveTiming once the reshaped playback is on and every field above is
+        // resolved. Gates reshaped vs. flat playback in FighterState.cpp.
+        bool timingCurveActive = false;
+        bool HasTimingCurve() const { return timingCurveActive; }
     };
 
     // One character's full moveset. Move-only (CombatDsl::Cancel holds a unique_ptr<Condition>).
@@ -185,6 +212,22 @@ namespace Game
     // resolvedJointIndex at -1 - FighterState.cpp treats that identically to "no bone was ever
     // authored," so a typo degrades to the old root-relative behavior rather than crashing.
     void ResolveHitboxJoints(const Asset::Model& model, MoveTable& moveTable);
+
+    // Auto-detects each move's strike/coil clip fractions (MoveDefinition::timingContactFraction
+    // / timingWindupFraction) by scanning its animation clip: at ~one sample per frame, evaluate
+    // the move's hitbox bone position and take the frame where it is furthest from the body's
+    // mean node position (the strike) and, before that, nearest (the coil). Only fills fields
+    // still at their sentinel; a move with no bone-attached hitbox, or whose clip can't be
+    // found, is left for FinalizeMoveTiming's fallback. Call once at startup, after
+    // ResolveHitboxJoints (it needs the resolved joint index) and before FinalizeMoveTiming.
+    void AnalyzeMoveTiming(const Asset::Model& model, const std::vector<Asset::Clip>& clips, MoveTable& moveTable);
+
+    // Resolves the game-feel layer: turns each move's `impact` (0..1) into concrete
+    // hold/hitstop/lunge values, fills every derived timing field still unset (curve shape
+    // constants, and the clip-fraction fallbacks AnalyzeMoveTiming couldn't supply), and sets
+    // timingCurveActive. A move with impact <= 0 and no explicit timingContact is left flat.
+    // Call once, after AnalyzeMoveTiming, before the move table is used by the sim.
+    void FinalizeMoveTiming(MoveTable& moveTable);
 
     // Targeted text patch for the hitbox-tuning debug tool's "Save" button - rewrites the six
     // numeric offsetX/offsetY/offsetZ/halfX/halfY/halfZ field lines of one hitbox block

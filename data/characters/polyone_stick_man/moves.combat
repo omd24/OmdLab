@@ -15,6 +15,13 @@
 # offsetX/Y/Z become a small refinement relative to that joint's own current position, not the
 # box's sole positioning - first-guess values below, easy to retune once real play/collision-
 # debug-draw makes clear whether they read as centered on the fist/foot.
+#
+# `impact` is the whole game-feel layer in one word: none | light | medium | heavy (or a raw
+# 0..1). It turns on a reshaped playback (eased wind-up -> snap to the strike pose -> brief
+# frozen hold -> fast recovery) plus a contact freeze-frame and a forward step, all scaled by
+# that one setting. Omit it (or `impact none`) and the clip plays flat, exactly as before.
+# Where the strike / coil poses actually are in each clip is auto-detected at load from the
+# hitbox bone - nothing to hand-find. See NOTES/COMBAT_GUIDE.md.
 
 move punch
 {
@@ -27,6 +34,7 @@ move punch
     onHitStun 14
     onBlockStun 8
     guardHeight mid
+    impact medium
 
     hitbox
     {
@@ -59,6 +67,7 @@ move kick_light
     onHitStun 16
     onBlockStun 10
     guardHeight mid
+    impact heavy
 
     hitbox
     {

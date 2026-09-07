@@ -175,6 +175,12 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
         // One-time name->index resolution for every hitbox's optional bone attachment - needs
         // the real imported model, so this is the earliest point it can run.
         Game::ResolveHitboxJoints(characterModel, characterDefinition.moveTable);
+        // Game-feel layer: auto-detect each move's strike/coil clip fractions from its clip +
+        // hitbox bone, then resolve `impact` (and any explicit override) into concrete
+        // timing/hitstop/lunge values. Order matters - Analyze needs the resolved joint index
+        // above, Finalize needs Analyze's detected fractions.
+        Game::AnalyzeMoveTiming(characterModel, characterModel.clips, characterDefinition.moveTable);
+        Game::FinalizeMoveTiming(characterDefinition.moveTable);
 
         // Dummy already carries its own copy of every scalar field (loaded from the same
         // character.combat above), but needs its own GPU-backed draw item instance -
@@ -210,6 +216,15 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
             punishMove.damage = realPunch->damage;
             punishMove.guardHeight = realPunch->guardHeight;
             punishMove.hitboxes = realPunch->hitboxes;
+            // Copy the already-resolved game-feel layer too, so the dummy's punish jab reads with
+            // the same weight/snap/hitstop the player's punch does (FinalizeMoveTiming ran above).
+            punishMove.impact = realPunch->impact;
+            punishMove.timingContactFraction = realPunch->timingContactFraction;
+            punishMove.timingWindupFraction = realPunch->timingWindupFraction;
+            punishMove.timingSnapFrames = realPunch->timingSnapFrames;
+            punishMove.hitStopFrames = realPunch->hitStopFrames;
+            punishMove.lungeDistance = realPunch->lungeDistance;
+            punishMove.timingCurveActive = realPunch->timingCurveActive;
             dummyDefinition.moveTable.moves.push_back(std::move(punishMove));
         }
     }
@@ -918,6 +933,27 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
                     characterPlayback.playbackTimeSeconds = 0.0f;
                 }
                 ImGui::Checkbox("Playing", &characterPlayback.playing);
+                // Scrub + readout. Drag to a pose, read off its clip fraction - that fraction is
+                // exactly what a move's timingContact / timingWindup fields want (see
+                // NOTES/COMBAT_GUIDE.md "Making a move hit hard"). Dragging pauses playback so the
+                // pose holds still while it's read.
+                if (clipIndex >= 0 && clipIndex < static_cast<int>(characterModel.clips.size()))
+                {
+                    const float scrubDuration = characterModel.clips[static_cast<size_t>(clipIndex)].durationSeconds;
+                    if (scrubDuration > 0.0f)
+                    {
+                        float clipFraction = std::clamp(characterPlayback.playbackTimeSeconds / scrubDuration, 0.0f, 1.0f);
+                        if (ImGui::SliderFloat("Scrub (clip fraction)", &clipFraction, 0.0f, 1.0f, "%.3f"))
+                        {
+                            characterPlayback.playing = false;
+                            characterPlayback.playbackTimeSeconds = clipFraction * scrubDuration;
+                        }
+                        ImGui::Text(
+                            "clip %.3f   frame %d / %d   %.3fs / %.3fs", clipFraction,
+                            static_cast<int>(std::round(clipFraction * scrubDuration * 60.0f)),
+                            static_cast<int>(std::round(scrubDuration * 60.0f)), clipFraction * scrubDuration, scrubDuration);
+                    }
+                }
                 ImGui::EndDisabled();
             }
         };

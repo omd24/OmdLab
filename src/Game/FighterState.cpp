@@ -49,6 +49,65 @@ namespace
         return -1;
     }
 
+    float SmoothStep01(float u)
+    {
+        u = std::clamp(u, 0.0f, 1.0f);
+        return u * u * (3.0f - 2.0f * u); // zero slope at both ends
+    }
+    float SmootherStep01(float u)
+    {
+        u = std::clamp(u, 0.0f, 1.0f);
+        return u * u * u * (u * (u * 6.0f - 15.0f) + 10.0f); // zero slope AND curvature at both ends
+    }
+
+    // Reshapes an attack's clip playback from a tick count into a seconds offset, when the move
+    // authored a timing curve. THREE segments over the move's own [startup | active | recovery]
+    // budget, all measured in the same speed-scaled ticks framesInMove counts in:
+    //   1. wind-up  [0, startup)          clip 0 -> windupFraction, smoothstep (settles into the coil)
+    //   2. snap     [startup, startup+snap) windupFraction -> contactFraction, smoothstep (explosive but continuous)
+    //   3. settle   [.., total)           contactFraction -> 1, smootherstep
+    // Every segment boundary meets at ~zero clip-time velocity, so playback never lurches - the
+    // old design's hard "hold" segment butting against a power-curve ramp is exactly what made
+    // the end of a move stutter. The soft dwell at the strike now comes for free: both the snap
+    // and the settle move slowly near contactFraction. The crisp gameplay freeze is hitStop,
+    // applied separately (FighterState::hitStopRemaining) - the animation itself never stops.
+    // The result is never wrapped/looped; it ends just shy of the clip's final frame and the
+    // Attack state exits (animationFinished) before it would matter.
+    float WarpedClipSeconds(const Game::MoveDefinition& move, uint32_t framesInMove, float clipDuration)
+    {
+        const float startup = static_cast<float>(move.startupFrames);
+        const float total = static_cast<float>(move.startupFrames + move.activeFrames + move.recoveryFrames);
+        float snap = static_cast<float>(std::max<uint32_t>(1u, move.timingSnapFrames));
+        if (startup + snap > total - 1.0f)
+        {
+            snap = std::max(1.0f, total - 1.0f - startup);
+        }
+        const float windupFraction = std::clamp(move.timingWindupFraction, 0.0f, 1.0f);
+        const float contactFraction = std::clamp(move.timingContactFraction, 0.0f, 1.0f);
+        const float f = static_cast<float>(framesInMove);
+
+        float fraction;
+        if (f < startup && startup > 0.0f)
+        {
+            fraction = windupFraction * SmoothStep01(f / startup);
+        }
+        else if (f < startup + snap)
+        {
+            fraction = windupFraction + (contactFraction - windupFraction) * SmoothStep01((f - startup) / snap);
+        }
+        else
+        {
+            const float denom = total - startup - snap;
+            const float u = denom > 0.0f ? (f - startup - snap) / denom : 1.0f;
+            fraction = contactFraction + (1.0f - contactFraction) * SmootherStep01(u);
+        }
+
+        float seconds = std::clamp(fraction, 0.0f, 1.0f) * clipDuration;
+        // Same epsilon-back-from-the-end guard SetClip's own non-looping path uses.
+        constexpr float kEndEpsilon = 1.0f / 120.0f;
+        return std::min(seconds, std::max(0.0f, clipDuration - kEndEpsilon));
+    }
+
     // Sets (not Advance()s) the clip and its playback time directly from a tick-derived frame
     // count - see main.cpp's own comment on why this entity's animation is now driven by the
     // same clock as the combat logic instead of wall-clock deltaSeconds. Every clip plays back
@@ -57,12 +116,17 @@ namespace
     // state's own frame counts are scaled by the same factor at load time (MoveTable.cpp's
     // BuildMoveTable), keeping clip and state duration in sync.
     //
+    // attackMove != nullptr AND it authored a timing curve: the linear tick->seconds map below
+    // is replaced by WarpedClipSeconds (anticipation / snap / hold / recovery reshaping). Passed
+    // only from the Attack branch of ApplyStateEffects; nullptr everywhere else keeps every
+    // other state's playback exactly as it was.
+    //
     // loop=false holds on the clip's final frame once played through once, instead of
     // restarting from frame 0 - KO/death shouldn't visibly loop forever the way Idle/Walk/Run
     // correctly do.
     void SetClip(
         Engine::ClipPlayback& playback, const std::vector<Asset::Clip>& clips, const std::string& clipName, uint32_t framesElapsed,
-        bool loop = true)
+        bool loop = true, const Game::MoveDefinition* attackMove = nullptr)
     {
         const int32_t clipIndex = FindClipIndex(clips, clipName);
         if (clipIndex < 0)
@@ -70,8 +134,15 @@ namespace
             return;
         }
         playback.clipIndex = clipIndex;
-        float t = static_cast<float>(framesElapsed) * Engine::FixedTimestepAccumulator::kFixedDeltaSeconds * Game::kCombatSpeedMultiplier;
         const float clipDuration = clips[clipIndex].durationSeconds;
+
+        if (attackMove != nullptr && attackMove->HasTimingCurve() && clipDuration > 0.0f)
+        {
+            playback.playbackTimeSeconds = WarpedClipSeconds(*attackMove, framesElapsed, clipDuration);
+            return;
+        }
+
+        float t = static_cast<float>(framesElapsed) * Engine::FixedTimestepAccumulator::kFixedDeltaSeconds * Game::kCombatSpeedMultiplier;
         if (clipDuration > 0.0f)
         {
             if (loop)
@@ -265,9 +336,26 @@ namespace
             if (activeMove != nullptr)
             {
                 clipName = activeMove->animationClip;
-                // No movement while attacking - moves are stationary for now, matching this
-                // phase's scope (no move-authored momentum/lunge distance exists in MoveDefinition
-                // yet).
+                // Forward lunge: a decelerating step that covers lungeDistance over the
+                // startup -> contact window and hits zero speed exactly at the strike, so the
+                // attacker plants rather than sliding through. Inert (moveUnitsPerSecond stays 0,
+                // the long-standing "moves are stationary" behavior) when lungeDistance == 0.
+                if (activeMove->lungeDistance != 0.0f)
+                {
+                    const uint32_t lungeWindowFrames =
+                        activeMove->startupFrames + std::max<uint32_t>(1u, activeMove->timingSnapFrames);
+                    if (state.framesInMove < lungeWindowFrames)
+                    {
+                        const float windowSeconds =
+                            static_cast<float>(lungeWindowFrames) * Engine::FixedTimestepAccumulator::kFixedDeltaSeconds;
+                        const float elapsedSeconds =
+                            static_cast<float>(state.framesInMove) * Engine::FixedTimestepAccumulator::kFixedDeltaSeconds;
+                        // v(t) = (2D/T)(1 - t/T): integrates to exactly D over [0, T], linear decel to 0 at T.
+                        const float peakSpeed = windowSeconds > 0.0f ? (2.0f * activeMove->lungeDistance / windowSeconds) : 0.0f;
+                        const float forwardSign = state.facingRight ? 1.0f : -1.0f;
+                        moveUnitsPerSecond = forwardSign * peakSpeed * (1.0f - elapsedSeconds / windowSeconds);
+                    }
+                }
                 for (const Game::MoveHitboxDef& hitboxDef : activeMove->hitboxes)
                 {
                     // forceShowAllHitboxes bypasses the authored active-frame window (debug aid
@@ -331,7 +419,9 @@ namespace
             // meant to loop; Attack/HitStun already naturally end (via animationFinished)
             // well before their clip would visibly wrap, so looping is a non-issue for them.
             const bool loopClip = state.currentState != "KO";
-            SetClip(clipPlayback, availableClips, clipName, state.framesInState, loopClip);
+            // activeMove is non-null only in the Attack branch above - it carries the optional
+            // timing curve SetClip reshapes playback with; nullptr for every other state.
+            SetClip(clipPlayback, availableClips, clipName, state.framesInState, loopClip, activeMove);
         }
 
         // Hitbox attach/detach - only ever present while a move's authored window says so. The
@@ -377,6 +467,18 @@ namespace Game
     void UpdateFighterState(entt::registry& registry, entt::entity entity, const FighterUpdateInput& input)
     {
         FighterState& state = registry.get<FighterState>(entity);
+
+        // Impact hitstop: while frozen, this fighter's whole tick is a no-op except for burning
+        // down the counter. Every clock stays put - framesInState/framesInMove don't advance,
+        // transitions aren't evaluated, ApplyStateEffects doesn't run (so the pose, the hitbox,
+        // and the Transform all hold exactly where last tick left them), and pushbackRemaining's
+        // ease-out is paused too, so knockback begins only once the freeze lifts. Set on both
+        // fighters together at the moment of the hit (see the HitStun-entry block below).
+        if (state.hitStopRemaining > 0)
+        {
+            --state.hitStopRemaining;
+            return;
+        }
 
         // Attacker-side bookkeeping for cancels: did THIS entity's hitbox land a hit last tick?
         // Latched, not tick-local (see FighterState.h's own comment on moveHitConfirmed) - reset
@@ -518,6 +620,22 @@ namespace Game
                         const bool wasBlocking =
                             previousState != "Run" && input.thisTickInput.buttons[static_cast<size_t>(FighterButton::Block)].held;
                         EnterState(state, input.characterDefinition, "");
+
+                        // Impact hitstop - freeze both fighters for the attacking move's authored
+                        // count. Set here rather than at HitEvent time so it fires exactly once
+                        // per hit (same reasoning as damage/stun just below), and on both hit and
+                        // block. The freeze itself is the early-out at the top of this function;
+                        // this only arms the counters. EnterState above already reset this
+                        // defender's other per-state bookkeeping but deliberately not
+                        // hitStopRemaining, so setting it after that call is safe.
+                        if (attackingMove->hitStopFrames > 0)
+                        {
+                            state.hitStopRemaining = attackingMove->hitStopFrames;
+                            if (FighterState* attackerState = registry.try_get<FighterState>(attackingEntity))
+                            {
+                                attackerState->hitStopRemaining = attackingMove->hitStopFrames;
+                            }
+                        }
 
                         // Push-back - queues a total distance into pushbackRemaining, eased out
                         // over the next several ticks (see UpdateFighterState's own comment),
