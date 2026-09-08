@@ -4,6 +4,7 @@
 #include <Windows.h>
 
 #include <dxgiformat.h>
+#include <vector>
 
 struct ID3D12CommandQueue;
 struct ID3D12Device;
@@ -68,5 +69,13 @@ namespace Renderer
         // work (e.g. ImGui's texture uploads). Only valid between Init()
         // and Shutdown().
         static ID3D12CommandQueue* GetCommandQueue();
+
+        // Dev capture. RequestCapture() flags this frame for a back-buffer readback, recorded
+        // in the next EndFrame() (back buffer still RENDER_TARGET there) and covered by its GPU
+        // wait. TakeCapture() then copies the result out - tightly packed 32bpp RGBA, top-down,
+        // sizing outRgba to width*height*4 - and returns true; false if no capture is pending.
+        // Call TakeCapture() after EndFrame()/DoFrame() has returned.
+        static void RequestCapture();
+        static bool TakeCapture(std::vector<unsigned char>& outRgba, unsigned& outWidth, unsigned& outHeight);
     };
 }

@@ -109,9 +109,13 @@ namespace Renderer
         // primaryContentUI/debugSectionUI are only ever invoked under OMD_DEV_TOOLS (see below) -
         // still accepted unconditionally so Game/main.cpp doesn't need its own #ifdef around
         // this call, just around constructing the lambdas it passes in.
+        // showDebugUI (dev-tools builds only): when false, the "Renderer Debug" window and the
+        // caller's primary/debug UI lambdas are skipped for this frame - ImGui still runs (an
+        // empty frame), so anything drawn straight onto its foreground draw list (e.g. a capture
+        // annotation) still shows. Lets a screenshot be taken without the panel in it.
         static bool DoFrame(
             const DirectX::XMFLOAT4X4& viewProjection, const std::function<void()>& primaryContentUI = {},
-            const std::function<void()>& debugSectionUI = {})
+            const std::function<void()>& debugSectionUI = {}, bool showDebugUI = true)
         {
 #ifdef OMD_DEV_TOOLS
             ImGuiHelper::NewFrame();
@@ -128,40 +132,44 @@ namespace Renderer
             static bool enableDebugDrawPass = false;
             bool resetRequested = false;
 
-            ImGui::Begin("Renderer Debug");
-            if (primaryContentUI)
+            if (showDebugUI)
             {
-                primaryContentUI();
+                ImGui::Begin("Renderer Debug");
+                if (primaryContentUI)
+                {
+                    primaryContentUI();
+                }
+                ImGui::SeparatorText("Debug");
+                if (ImGui::Checkbox("Background compute pass", &enableBackgroundPass))
+                {
+                    Foundation::Log::Write(
+                        Foundation::Log::Severity::Info, "Renderer", "Background compute pass %s",
+                        enableBackgroundPass ? "enabled" : "disabled");
+                }
+                if (ImGui::Checkbox("Forward triangle pass", &enableForwardPass))
+                {
+                    Foundation::Log::Write(
+                        Foundation::Log::Severity::Info, "Renderer", "Forward triangle pass %s", enableForwardPass ? "enabled" : "disabled");
+                }
+                if (ImGui::Checkbox("Collision debug draw", &enableDebugDrawPass))
+                {
+                    Foundation::Log::Write(
+                        Foundation::Log::Severity::Info, "Renderer", "Collision debug draw %s", enableDebugDrawPass ? "enabled" : "disabled");
+                }
+                if (debugSectionUI)
+                {
+                    debugSectionUI();
+                }
+                if (ImGui::Button("Reset to defaults"))
+                {
+                    enableBackgroundPass = false;
+                    enableForwardPass = false;
+                    enableDebugDrawPass = false;
+                    resetRequested = true;
+                    Foundation::Log::Write(Foundation::Log::Severity::Info, "Renderer", "Reset to defaults");
+                }
+                ImGui::End();
             }
-            ImGui::SeparatorText("Debug");
-            if (ImGui::Checkbox("Background compute pass", &enableBackgroundPass))
-            {
-                Foundation::Log::Write(
-                    Foundation::Log::Severity::Info, "Renderer", "Background compute pass %s", enableBackgroundPass ? "enabled" : "disabled");
-            }
-            if (ImGui::Checkbox("Forward triangle pass", &enableForwardPass))
-            {
-                Foundation::Log::Write(
-                    Foundation::Log::Severity::Info, "Renderer", "Forward triangle pass %s", enableForwardPass ? "enabled" : "disabled");
-            }
-            if (ImGui::Checkbox("Collision debug draw", &enableDebugDrawPass))
-            {
-                Foundation::Log::Write(
-                    Foundation::Log::Severity::Info, "Renderer", "Collision debug draw %s", enableDebugDrawPass ? "enabled" : "disabled");
-            }
-            if (debugSectionUI)
-            {
-                debugSectionUI();
-            }
-            if (ImGui::Button("Reset to defaults"))
-            {
-                enableBackgroundPass = false;
-                enableForwardPass = false;
-                enableDebugDrawPass = false;
-                resetRequested = true;
-                Foundation::Log::Write(Foundation::Log::Severity::Info, "Renderer", "Reset to defaults");
-            }
-            ImGui::End();
 #endif
 
             Device::BeginFrame();

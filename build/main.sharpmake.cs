@@ -98,6 +98,9 @@ public class Foundation : OmdLabProjectBase
         base.ConfigureAll(conf, target);
         // XInput gamepad polling (Foundation/Input.cpp).
         conf.LibraryFiles.Add("Xinput.lib");
+        // WIC (Windows Imaging Component) PNG encoding for Foundation/Image.cpp - used by the
+        // dev-only frame-capture harness.
+        conf.LibraryFiles.Add("Windowscodecs.lib");
     }
 }
 

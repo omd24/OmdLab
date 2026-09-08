@@ -4,8 +4,10 @@
 #include "Foundation/Log.h"
 
 #include <cstdlib>
+#include <cstring>
 #include <d3d12.h>
 #include <dxgi1_6.h>
+#include <vector>
 #include <wrl/client.h>
 
 using Microsoft::WRL::ComPtr;
@@ -49,6 +51,18 @@ namespace
     HANDLE g_fenceEvent = nullptr;
     UINT64 g_fenceValue = 0;
 
+    // Dev capture (DeviceDX12::RequestCapture/TakeCapture). g_captureReadback is a
+    // HEAP_TYPE_READBACK buffer the back buffer is CopyTextureRegion'd into during EndFrame,
+    // grown on demand and reused. Not double-buffered: EndFrame's WaitForGpu() fully retires
+    // the copy before anything reads it, same reasoning as g_depthBuffer/g_computeTarget.
+    bool g_captureRequested = false;
+    bool g_captureReady = false;
+    ComPtr<ID3D12Resource> g_captureReadback;
+    UINT64 g_captureReadbackBytes = 0;
+    UINT g_captureRowPitch = 0;
+    UINT g_captureWidth = 0;
+    UINT g_captureHeight = 0;
+
     void CheckHr(HRESULT hr, const char* what)
     {
         OMD_ASSERT(SUCCEEDED(hr), "%s failed with HRESULT 0x%08lX", what, static_cast<unsigned long>(hr));
@@ -70,6 +84,64 @@ namespace
         barrier.Transition.StateAfter = after;
         barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         g_commandList->ResourceBarrier(1, &barrier);
+    }
+
+    // Records a copy of the back buffer into g_captureReadback, for DeviceDX12::TakeCapture to
+    // read on the CPU. Called from EndFrame while the back buffer is still RENDER_TARGET (before
+    // its PRESENT transition); the copy rides the same command-list submission and is covered by
+    // EndFrame's WaitForGpu(). The readback buffer's row pitch is aligned to
+    // D3D12_TEXTURE_DATA_PITCH_ALIGNMENT (GetCopyableFootprints handles that) - TakeCapture
+    // repacks to a tight width*4 stride.
+    void RecordBackBufferCapture(ID3D12Resource* backBuffer)
+    {
+        const D3D12_RESOURCE_DESC desc = backBuffer->GetDesc();
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint = {};
+        UINT64 totalBytes = 0;
+        g_device->GetCopyableFootprints(&desc, 0, 1, 0, &footprint, nullptr, nullptr, &totalBytes);
+
+        if (!g_captureReadback || g_captureReadbackBytes < totalBytes)
+        {
+            g_captureReadback.Reset();
+            D3D12_HEAP_PROPERTIES heapProps = {};
+            heapProps.Type = D3D12_HEAP_TYPE_READBACK;
+
+            D3D12_RESOURCE_DESC bufferDesc = {};
+            bufferDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+            bufferDesc.Width = totalBytes;
+            bufferDesc.Height = 1;
+            bufferDesc.DepthOrArraySize = 1;
+            bufferDesc.MipLevels = 1;
+            bufferDesc.Format = DXGI_FORMAT_UNKNOWN;
+            bufferDesc.SampleDesc.Count = 1;
+            bufferDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+            CheckHr(
+                g_device->CreateCommittedResource(
+                    &heapProps, D3D12_HEAP_FLAG_NONE, &bufferDesc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                    IID_PPV_ARGS(&g_captureReadback)),
+                "CreateCommittedResource (capture readback)");
+            g_captureReadbackBytes = totalBytes;
+        }
+
+        TransitionResource(backBuffer, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+
+        D3D12_TEXTURE_COPY_LOCATION dst = {};
+        dst.pResource = g_captureReadback.Get();
+        dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        dst.PlacedFootprint = footprint;
+
+        D3D12_TEXTURE_COPY_LOCATION src = {};
+        src.pResource = backBuffer;
+        src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        src.SubresourceIndex = 0;
+
+        g_commandList->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+        TransitionResource(backBuffer, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+
+        g_captureRowPitch = footprint.Footprint.RowPitch;
+        g_captureWidth = footprint.Footprint.Width;
+        g_captureHeight = footprint.Footprint.Height;
+        g_captureReady = true;
     }
 
     // Shared by CompositeComputeTarget()/ClearAndBindRenderTarget() - both
@@ -397,6 +469,14 @@ namespace Renderer
         const UINT backBufferIndex = g_swapChain->GetCurrentBackBufferIndex();
         ID3D12Resource* backBuffer = g_backBuffers[backBufferIndex].Get();
 
+        // Dev capture: while the back buffer is still RENDER_TARGET, record a readback copy of
+        // the finished frame. TakeCapture() reads it after this function's WaitForGpu().
+        if (g_captureRequested)
+        {
+            g_captureRequested = false;
+            RecordBackBufferCapture(backBuffer);
+        }
+
         TransitionResource(backBuffer, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
         CheckHr(g_commandList->Close(), "ID3D12GraphicsCommandList::Close");
 
@@ -436,5 +516,38 @@ namespace Renderer
     ID3D12CommandQueue* DeviceDX12::GetCommandQueue()
     {
         return g_commandQueue.Get();
+    }
+
+    void DeviceDX12::RequestCapture()
+    {
+        g_captureRequested = true;
+    }
+
+    bool DeviceDX12::TakeCapture(std::vector<unsigned char>& outRgba, unsigned& outWidth, unsigned& outHeight)
+    {
+        if (!g_captureReady)
+        {
+            return false;
+        }
+        g_captureReady = false;
+
+        const SIZE_T mappedBytes = static_cast<SIZE_T>(g_captureRowPitch) * g_captureHeight;
+        const D3D12_RANGE readRange = { 0, mappedBytes };
+        void* mapped = nullptr;
+        CheckHr(g_captureReadback->Map(0, &readRange, &mapped), "Map (capture readback)");
+
+        outWidth = g_captureWidth;
+        outHeight = g_captureHeight;
+        const size_t tightPitch = static_cast<size_t>(outWidth) * 4;
+        outRgba.resize(tightPitch * outHeight);
+        const auto* srcBytes = static_cast<const unsigned char*>(mapped);
+        for (unsigned y = 0; y < outHeight; ++y)
+        {
+            std::memcpy(outRgba.data() + y * tightPitch, srcBytes + static_cast<size_t>(y) * g_captureRowPitch, tightPitch);
+        }
+
+        const D3D12_RANGE writtenNothing = { 0, 0 };
+        g_captureReadback->Unmap(0, &writtenNothing);
+        return true;
     }
 }

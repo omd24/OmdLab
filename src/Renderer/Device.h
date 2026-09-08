@@ -11,6 +11,8 @@
     #include "dx12/DeviceDX12.h"
 #endif
 
+#include <vector>
+
 namespace Renderer
 {
     // Owns the graphics device, swap chain, and per-frame submission state.
@@ -72,6 +74,18 @@ namespace Renderer
         static unsigned int GetHeight()
         {
             return OMD_GFX_CALL(Device, GetHeight());
+        }
+
+        // Dev capture of the rendered frame - see the backend header for the readback timing.
+        // RequestCapture() before the frame's DoFrame(); TakeCapture() after it returns.
+        static void RequestCapture()
+        {
+            OMD_GFX_CALL(Device, RequestCapture());
+        }
+
+        static bool TakeCapture(std::vector<unsigned char>& outRgba, unsigned& outWidth, unsigned& outHeight)
+        {
+            return OMD_GFX_CALL(Device, TakeCapture(outRgba, outWidth, outHeight));
         }
     };
 }

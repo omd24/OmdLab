@@ -6,9 +6,11 @@
 #include "Engine/Components.h"
 #include "Engine/Engine.h"
 #include "Engine/FixedTimestep.h"
+#include "Engine/FrameCapture.h"
 #include "Engine/Input.h"
 #include "Engine/ModelResources.h"
 #include "Foundation/Debug.h"
+#include "Foundation/Input.h"
 #include "Foundation/Log.h"
 #include "Foundation/Window.h"
 #include "Renderer/Buffer.h"
@@ -530,11 +532,39 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
 
     auto lastFrameTime = std::chrono::steady_clock::now();
 
+#ifdef OMD_DEV_TOOLS
+    // Capture-harness hotkeys (dev tools only). F9: screenshot the frame about to be rendered.
+    // Ctrl+R: hide/show the debug UI so it isn't in the shot or eating the frame. Polled via
+    // GetAsyncKeyState (Foundation::IsKeyDown), same focus-independent approach the free-fly
+    // camera uses; edge-detected against the previous frame so a held key fires once.
+    bool captureDebugUIVisible = true;
+    bool f9WasDown = false;
+    bool ctrlRWasDown = false;
+#endif
+
     while (Foundation::PumpMessages())
     {
         const auto now = std::chrono::steady_clock::now();
         const float deltaSeconds = std::chrono::duration<float>(now - lastFrameTime).count();
         lastFrameTime = now;
+
+#ifdef OMD_DEV_TOOLS
+        {
+            const bool f9Down = Foundation::IsKeyDown(VK_F9);
+            if (f9Down && !f9WasDown)
+            {
+                Engine::FrameCapture::Grab("manual");
+            }
+            f9WasDown = f9Down;
+
+            const bool ctrlRDown = Foundation::IsKeyDown(VK_CONTROL) && Foundation::IsKeyDown('R');
+            if (ctrlRDown && !ctrlRWasDown)
+            {
+                captureDebugUIVisible = !captureDebugUIVisible;
+            }
+            ctrlRWasDown = ctrlRDown;
+        }
+#endif
 
         bindingsReloadTimer += deltaSeconds;
         if (bindingsReloadTimer >= 1.0f)
@@ -1239,7 +1269,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
             ImGui::Text("Hits: %zu  Triggers: %zu", lastCollisionEvents.hits.size(), lastCollisionEvents.triggers.size());
         };
 
-        if (Renderer::RenderTasks::DoFrame(viewProjection, primaryContentUI, debugSectionUI))
+        if (Renderer::RenderTasks::DoFrame(viewProjection, primaryContentUI, debugSectionUI, captureDebugUIVisible))
         {
             camera = Engine::Camera{};
             enableCameraFollow = true;
@@ -1285,6 +1315,11 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
 #else
         Renderer::RenderTasks::DoFrame(viewProjection);
 #endif
+
+        // Encode + write any screenshot queued this frame (F9 / a future scripted capture).
+        // No-op unless FrameCapture::Grab was called; the readback it reads is valid now that
+        // DoFrame's EndFrame has presented and waited on the GPU.
+        Engine::FrameCapture::ResolvePending();
     }
 
     Renderer::RenderTasks::Shutdown();
