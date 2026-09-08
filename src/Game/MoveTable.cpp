@@ -477,10 +477,12 @@ namespace Game
 
             // Weight scales with `impact`. Already in runtime ticks / world units - NOT re-scaled
             // by kCombatSpeedMultiplier (unlike an explicitly-authored value, which BuildMoveTable
-            // already rescaled from 60Hz). hitStop is the only hard freeze in the whole move, so
-            // it carries the "impact weight" on its own now that the animation never hard-stops.
+            // already rescaled from 60Hz). hitStop is the only hard freeze in the whole move; it
+            // carries the "impact weight" now that the animation never hard-stops - but a full
+            // freeze of BOTH fighters reads as a stutter past a couple of frames, so the weight
+            // is small: heavy 3t (~50ms), medium ~2t, light ~1t, none 0.
             if (move.hitStopFrames == MoveDefinition::kUnsetFrames)
-                move.hitStopFrames = static_cast<uint32_t>(std::lround(9.0f * k));
+                move.hitStopFrames = static_cast<uint32_t>(std::lround(3.0f * k));
             if (move.lungeDistance < 0.0f)
                 move.lungeDistance = 0.42f * k;
 

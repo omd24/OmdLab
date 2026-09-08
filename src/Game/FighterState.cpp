@@ -4,9 +4,10 @@
 #include "InputBindings.h"
 #include "Asset/Model.h"
 #include "Engine/Animation.h"
-#include "Engine/ClipPlayback.h"
+#include "Engine/Animator.h"
 #include "Engine/Components.h"
 #include "Engine/FixedTimestep.h"
+#include "Foundation/Log.h"
 
 #include <algorithm>
 #include <cmath>
@@ -15,13 +16,12 @@ namespace
 {
     // Global, single-stage gravity for Jump's closed-form arc - not per-character/authored,
     // matching the flat-single-stage, one-character-for-now scope. Paired with CharacterStats::
-    // jumpSpeed's own default so a neutral jump's total airtime lands close to jump_in_place's
-    // own ~1.967s as a starting anchor - an eyeball-tuned starting point, adjust either constant
-    // to change jump feel. Scaled by kCombatSpeedMultiplier so Jump's own physics-derived
-    // airtime shrinks in lockstep with every clip now playing back faster (see that constant's
-    // own comment) - a smaller peak height is an accepted side effect of this specific lever,
-    // not a bug; retune Game::CharacterStats::jumpSpeed upward if jumps read as too low.
-    constexpr float kGravity = 3.0f * Game::kCombatSpeedMultiplier;
+    // jumpSpeed (7.5) for a snappy ~0.69s total airtime, peak height ~1.30 - a fighting-game
+    // jump, not the old ~1.67s float. The jump clip is phase-mapped onto this arc (see the
+    // Jump branch of the clip path below), so the airtime no longer has to match any clip's
+    // own length. Scaled by kCombatSpeedMultiplier so airtime tracks the global clip-speed
+    // lever. Eyeball-tuned - adjust this or jumpSpeed to retune (g = 8*peakHeight/airtime^2).
+    constexpr float kGravity = 18.0f * Game::kCombatSpeedMultiplier;
 
     // Total push-back distances, queued into FighterState::pushbackRemaining the tick HitStun
     // is entered and eased out over the next several ticks (see kPushbackDecayPerTick below) -
@@ -48,6 +48,7 @@ namespace
         }
         return -1;
     }
+
 
     float SmoothStep01(float u)
     {
@@ -116,30 +117,23 @@ namespace
     // state's own frame counts are scaled by the same factor at load time (MoveTable.cpp's
     // BuildMoveTable), keeping clip and state duration in sync.
     //
-    // attackMove != nullptr AND it authored a timing curve: the linear tick->seconds map below
-    // is replaced by WarpedClipSeconds (anticipation / snap / hold / recovery reshaping). Passed
-    // only from the Attack branch of ApplyStateEffects; nullptr everywhere else keeps every
-    // other state's playback exactly as it was.
+    // The active clip's playback time for a state at `framesElapsed` ticks in. Pure - the
+    // Animator (Play/SetTime) does the actual playback + crossfade; this only answers "what
+    // second of the clip", kept separate so playback logic never mixes with time selection.
     //
-    // loop=false holds on the clip's final frame once played through once, instead of
-    // restarting from frame 0 - KO/death shouldn't visibly loop forever the way Idle/Walk/Run
-    // correctly do.
-    void SetClip(
-        Engine::ClipPlayback& playback, const std::vector<Asset::Clip>& clips, const std::string& clipName, uint32_t framesElapsed,
-        bool loop = true, const Game::MoveDefinition* attackMove = nullptr)
+    // attackMove != nullptr AND it authored a timing curve: the linear tick->seconds map is
+    // replaced by WarpedClipSeconds (the anticipation / snap / settle reshaping). Passed only
+    // from the Attack branch of ApplyStateEffects; nullptr everywhere else = the same linear
+    // playback every other state always had. loop=false holds a hair before the clip's final
+    // frame instead of wrapping - KO/death shouldn't visibly loop.
+    float ComputeClipSeconds(
+        const Asset::Clip& clip, uint32_t framesElapsed, bool loop, const Game::MoveDefinition* attackMove)
     {
-        const int32_t clipIndex = FindClipIndex(clips, clipName);
-        if (clipIndex < 0)
-        {
-            return;
-        }
-        playback.clipIndex = clipIndex;
-        const float clipDuration = clips[clipIndex].durationSeconds;
+        const float clipDuration = clip.durationSeconds;
 
         if (attackMove != nullptr && attackMove->HasTimingCurve() && clipDuration > 0.0f)
         {
-            playback.playbackTimeSeconds = WarpedClipSeconds(*attackMove, framesElapsed, clipDuration);
-            return;
+            return WarpedClipSeconds(*attackMove, framesElapsed, clipDuration);
         }
 
         float t = static_cast<float>(framesElapsed) * Engine::FixedTimestepAccumulator::kFixedDeltaSeconds * Game::kCombatSpeedMultiplier;
@@ -151,8 +145,6 @@ namespace
             }
             else
             {
-                // A tiny epsilon back from the true end avoids landing exactly on/after the
-                // last sample, which some samplers could wrap via their own modulo.
                 constexpr float kEndEpsilon = 1.0f / 60.0f;
                 const float heldT = clipDuration - kEndEpsilon;
                 if (t > heldT)
@@ -161,7 +153,64 @@ namespace
                 }
             }
         }
-        playback.playbackTimeSeconds = t;
+        return t;
+    }
+
+    // Crossfade length when a fighter's visible clip changes, keyed on the state it's entering.
+    // Reactive states snap in (a flinch shouldn't ease); settling to a locomotion/idle state is
+    // the smooth case - and the one that fixes the Attack -> Idle hard cut. In sim seconds.
+    float BlendInSeconds(const std::string& targetState)
+    {
+        if (targetState == "HitStun") return 0.04f;
+        if (targetState == "KO") return 0.03f;
+        if (targetState == "Attack") return 0.05f;
+        if (targetState == "Jump") return 0.06f;
+        return 0.10f; // Idle / Walk / Run
+    }
+
+    // Bounds on the Attack recovery blend-out's crossfade length. Floor: a move with a very
+    // short recovery still eases home rather than cutting. Ceiling: a long authored recovery
+    // (kick_light's is ~0.7s) shouldn't spend all of it easing to idle - that reads as a
+    // sluggish return. Past the ceiling the crossfade is done and the fighter simply stands in
+    // live idle for the rest of the (gameplay) recovery lock - standing, not frozen.
+    constexpr float kMinRecoveryBlendSeconds = 0.13f;
+    constexpr float kMaxRecoveryBlendSeconds = 0.20f;
+
+    // Advances the locomotion blend space's param + phase by one fixed tick toward
+    // targetUnitsPerSecond, sanitising both accumulators first. A single NaN/Inf (a bad input
+    // axis, a degenerate blend-space sample) would otherwise feed back through the += / fmod
+    // every tick forever - the pose freezes and the mesh renders as a collapsed point, i.e.
+    // invisible, until restart (PoseIsFinite is the render-side backstop for the same class of
+    // fault). Shared by the Idle/Walk/Run path and the Attack recovery blend-out so the guard
+    // can't drift between them.
+    void DriveLocomotion(
+        Engine::Animator& animator, const Engine::BlendSpace1D& space, const std::vector<Asset::Clip>& clips,
+        float targetUnitsPerSecond)
+    {
+        constexpr float kFixedDt = Engine::FixedTimestepAccumulator::kFixedDeltaSeconds;
+        constexpr float kParamEase = 12.0f * kFixedDt; // < 1: stable fraction-per-tick settle (~0.08s)
+
+        if (!std::isfinite(animator.blendParam))
+        {
+            animator.blendParam = 0.0f;
+        }
+        if (!std::isfinite(targetUnitsPerSecond))
+        {
+            targetUnitsPerSecond = 0.0f;
+        }
+        animator.blendParam += (targetUnitsPerSecond - animator.blendParam) * kParamEase;
+
+        float rate = Engine::BlendSpace1DPhaseRate(space, animator.blendParam, clips);
+        if (!std::isfinite(rate))
+        {
+            rate = 0.0f;
+        }
+        float nextPhase = animator.blendPhase01 + rate * kFixedDt;
+        if (!std::isfinite(nextPhase))
+        {
+            nextPhase = 0.0f;
+        }
+        animator.blendPhase01 = std::fmod(nextPhase, 1.0f);
     }
 
     // Computes the world-space offset (relative to the entity's own Transform, matching
@@ -284,7 +333,7 @@ namespace
     void ApplyStateEffects(entt::registry& registry, entt::entity entity, const Game::FighterState& state, const Game::CharacterDefinition& characterDefinition, const Engine::InputCommand& input, const std::vector<Asset::Clip>& availableClips, const Asset::Model& characterModel, bool forceShowAllHitboxes)
     {
         Engine::Transform& transform = registry.get<Engine::Transform>(entity);
-        Engine::ClipPlayback& clipPlayback = registry.get<Engine::ClipPlayback>(entity);
+        Engine::Animator& animator = registry.get<Engine::Animator>(entity);
 
         // Grounded by default - only Jump's own branch below overrides this. No other state
         // touches position.y, so without this reset, getting interrupted out of Jump early (hit
@@ -294,16 +343,24 @@ namespace
 
         float moveUnitsPerSecond = 0.0f;
         std::string clipName;
+        // Idle/Walk/Run drive their animation from the locomotion blend space (keyed on signed
+        // movement speed), not a single clip. The other states set clipName and go through the
+        // single-clip path further down.
+        bool locomotion = false;
+        // Set by the Attack branch once a move's strike motion (startup + active) is spent: the
+        // attack clip stops being sampled and the pose crossfades to idle across the remaining
+        // recovery - see the animator-drive section below.
+        bool recoveryBlendOut = false;
         const Game::MoveHitboxDef* activeHitbox = nullptr;
         const Game::MoveDefinition* activeMove = nullptr;
 
         if (state.currentState == "Idle")
         {
-            clipName = "idle";
+            locomotion = true;
         }
         else if (state.currentState == "Walk")
         {
-            clipName = input.axis >= 0.0f ? "walk_forward" : "walk_backward";
+            locomotion = true;
             moveUnitsPerSecond = characterDefinition.stats.walkSpeed * input.axis;
         }
         else if (state.currentState == "Run")
@@ -311,13 +368,9 @@ namespace
             // Run is a committed forward dash, not conditional on the movement axis at all -
             // holding just the Run button moves forward (matches this being a rushdown
             // mechanic - see the design doc's "Run mechanic confirmed" note), and holding Back
-            // doesn't reverse it. A backward run (run_backward clip, imported but otherwise
-            // unused) was tried and dropped for now - the clip shows the character's back to the
-            // camera, which reads wrong for this side-view game; holding Back during Run
-            // currently has no distinct effect. Backlog idea (not MVP): a deliberate "retreat"
-            // mode using this same clip, gated behind a real gameplay cost (e.g. extra damage
-            // taken) rather than just re-adding it as a free direction toggle.
-            clipName = "running";
+            // doesn't reverse it. A backward run was tried and dropped for now - the clip shows
+            // the character's back to the camera, which reads wrong for this side-view game.
+            locomotion = true;
             moveUnitsPerSecond = characterDefinition.stats.runSpeed;
         }
         else if (state.currentState == "Jump")
@@ -367,6 +420,31 @@ namespace
                         break;
                     }
                 }
+
+                // Hand the pose off to a smooth crossfade-to-idle (the "recovery blend-out")
+                // right after the strike LANDS - contact is ~startup + snap - not at the end of
+                // the authored active window. The few frames between contact and active-end are
+                // the warped clip playing its OWN retract, which (especially with a short
+                // recovery) yanks the limb back unnaturally fast; letting the blend-out own the
+                // entire return keeps it smooth and lets the state end promptly so the player
+                // isn't input-locked watching a recovery animation. The hitbox window is
+                // unchanged (checked above independently) - it just tracks a pose that's already
+                // easing home over its last frame or two. Needs a locomotion blend space to
+                // fade toward - every real character has one. Falls back to active-end for a
+                // move with no timing curve.
+                uint32_t motionFrames = activeMove->startupFrames + activeMove->activeFrames;
+                if (activeMove->HasTimingCurve())
+                {
+                    // Hand off exactly at contact (end of the snap segment). Not a frame later:
+                    // the warp curve's settle segment, compressed by a short recovery, races the
+                    // clip's own retract and the handoff snaps the limb back hard.
+                    motionFrames = activeMove->startupFrames + std::max<uint32_t>(1u, activeMove->timingSnapFrames);
+                }
+                if (state.framesInMove >= motionFrames && state.stateDurationFrames > motionFrames &&
+                    !characterDefinition.locomotionBlendSpace.samples.empty())
+                {
+                    recoveryBlendOut = true;
+                }
             }
         }
         else if (state.currentState == "HitStun")
@@ -402,6 +480,14 @@ namespace
             }
         }
 
+        // A non-finite speed here would poison transform.position permanently (a NaN world
+        // matrix renders nothing, and position is only ever accumulated, never recomputed) -
+        // this cannot happen from any known path, but the failure is severe and silent, so
+        // clamp it at the one point it would enter.
+        if (!std::isfinite(moveUnitsPerSecond))
+        {
+            moveUnitsPerSecond = 0.0f;
+        }
         if (moveUnitsPerSecond != 0.0f)
         {
             transform.position.x += moveUnitsPerSecond * Engine::FixedTimestepAccumulator::kFixedDeltaSeconds;
@@ -413,15 +499,98 @@ namespace
         // margin, so the visible floor and this clamp stay tied to one stage-size constant while
         // still keeping the whole fighter body on the floor - see GameConstants.h.
         transform.position.x = std::clamp(transform.position.x, -Game::kStageMovementHalfWidth, Game::kStageMovementHalfWidth);
-        if (!clipName.empty())
+        if (!std::isfinite(transform.position.x))
         {
-            // Only KO shouldn't loop - see SetClip's own comment. Idle/Walk/Run/Jump are
-            // meant to loop; Attack/HitStun already naturally end (via animationFinished)
-            // well before their clip would visibly wrap, so looping is a non-issue for them.
-            const bool loopClip = state.currentState != "KO";
-            // activeMove is non-null only in the Attack branch above - it carries the optional
-            // timing curve SetClip reshapes playback with; nullptr for every other state.
-            SetClip(clipPlayback, availableClips, clipName, state.framesInState, loopClip, activeMove);
+            Foundation::Log::Write(
+                Foundation::Log::Severity::Error, "FighterState", "non-finite transform.position.x - reset to 0 (state '%s')",
+                state.currentState.c_str());
+            transform.position.x = 0.0f;
+        }
+
+        // Masked overlay is opt-in per tick (only the in-place jump sets it, below) - clear it
+        // here so it never lingers into another state.
+        animator.overlayClipIndex = -1;
+        animator.overlayMask = nullptr;
+        animator.overlayWeight = 1.0f;
+
+        if (locomotion)
+        {
+            // Blend space instead of a single clip. PlayBlendSpace() crossfades on entry
+            // (no-op once we're on it); blendParam / blendPhase01 are driven by DriveLocomotion,
+            // which also sanitises them. Easing the param (rather than snapping) is what keeps a
+            // released stick from jumping walk-pose -> idle-pose in one tick, and keeps the
+            // Walk<->Idle<->Run changes soft (they don't re-arm the crossfade - same source).
+            const Engine::BlendSpace1D& space = characterDefinition.locomotionBlendSpace;
+            animator.PlayBlendSpace(characterModel, availableClips, &space, BlendInSeconds(state.currentState));
+            DriveLocomotion(animator, space, availableClips, moveUnitsPerSecond);
+        }
+        else if (recoveryBlendOut)
+        {
+            // Crossfade the leftover attack pose to idle across the rest of the recovery window,
+            // finishing right as the Attack state exits. PlayBlendSpace bakes the current pose
+            // into prevPose on this first tick and no-ops afterwards; Animator::Advance burns
+            // the weight. Target speed 0 -> the idle pose; phase keeps ticking so idle isn't
+            // frozen mid-fade. When the state finally flips to Idle its own PlayBlendSpace call
+            // is a same-space no-op and the fade is already complete.
+            const Engine::BlendSpace1D& space = characterDefinition.locomotionBlendSpace;
+            const float recoverySeconds = static_cast<float>(state.stateDurationFrames - state.framesInMove) *
+                                            Engine::FixedTimestepAccumulator::kFixedDeltaSeconds;
+            const float blendSeconds =
+                std::clamp(recoverySeconds, kMinRecoveryBlendSeconds, kMaxRecoveryBlendSeconds);
+            animator.PlayBlendSpace(characterModel, availableClips, &space, blendSeconds);
+            DriveLocomotion(animator, space, availableClips, 0.0f);
+        }
+        else if (!clipName.empty())
+        {
+            const int32_t clipIndex = FindClipIndex(availableClips, clipName);
+            if (clipIndex >= 0)
+            {
+                const Asset::Clip& clip = availableClips[static_cast<size_t>(clipIndex)];
+                // Jump maps its clip onto the physical arc: one full playthrough (no loop) over
+                // the airtime, so takeoff -> apex -> land line up with the parabola whatever the
+                // clip's own length is - the retargeted jump clips run 0.7s to 1.97s, so a
+                // fixed-rate playback either loops a short one mid-air or hangs on a long one.
+                // KO holds its last frame; everything else (Attack/HitStun) ends via
+                // animationFinished before its clip would wrap, so it loops harmlessly.
+                const bool jumpArc = state.currentState == "Jump" && state.stateDurationFrames > 0;
+                const bool loopClip = state.currentState != "KO" && !jumpArc;
+                animator.PlayClip(characterModel, availableClips, clipIndex, loopClip, BlendInSeconds(state.currentState));
+                if (jumpArc && state.jumpClip == "jump_in_place")
+                {
+                    // A neutral jump is a HELD pose plus one smooth sway - never the clip
+                    // playing back (which, sped onto the short arc, loops the arms and head
+                    // rapidly). Base = an early frame of the jump clip, held. Overlay
+                    // = a slightly later frame of the SAME clip, held, blended in by a single
+                    // sine hump over the airtime (0 at takeoff -> peak at apex -> 0 on landing).
+                    // The result morphs once between two frames of the jump and back - a subtle
+                    // rise-and-settle of the whole body, no oscillation. Directional jumps use
+                    // short clips and phase-map fine (below).
+                    const float phase = std::clamp(
+                        static_cast<float>(state.framesInState) / static_cast<float>(state.stateDurationFrames), 0.0f, 1.0f);
+                    constexpr float kHeldFraction = 0.10f;
+                    constexpr float kSwayToFraction = 0.35f;
+                    constexpr float kSwayAmount = 0.6f;
+                    animator.SetTime(kHeldFraction * clip.durationSeconds);
+                    if (!characterDefinition.jumpFloatMask.empty())
+                    {
+                        animator.overlayClipIndex = clipIndex; // same clip, a later held frame
+                        animator.overlayClipSeconds = kSwayToFraction * clip.durationSeconds;
+                        animator.overlayMask = &characterDefinition.jumpFloatMask;
+                        animator.overlayWeight = std::sin(phase * DirectX::XM_PI) * kSwayAmount;
+                    }
+                }
+                else if (jumpArc)
+                {
+                    // Phase-map the clip onto the arc: one playthrough over the airtime.
+                    const float phase = std::clamp(
+                        static_cast<float>(state.framesInState) / static_cast<float>(state.stateDurationFrames), 0.0f, 1.0f);
+                    animator.SetTime(phase * clip.durationSeconds);
+                }
+                else
+                {
+                    animator.SetTime(ComputeClipSeconds(clip, state.framesInState, loopClip, activeMove));
+                }
+            }
         }
 
         // Hitbox attach/detach - only ever present while a move's authored window says so. The
@@ -445,6 +614,55 @@ namespace
 
 namespace Game
 {
+    void BuildLocomotionBlendSpace(const std::vector<Asset::Clip>& clips, CharacterDefinition& characterDefinition)
+    {
+        const float walk = characterDefinition.stats.walkSpeed;
+        const float run = characterDefinition.stats.runSpeed;
+        const struct
+        {
+            const char* clip;
+            float param;
+        } wanted[] = {
+            { "walk_backward", -walk },
+            { "idle", 0.0f },
+            { "walk_forward", walk },
+            { "running", run },
+        };
+
+        Engine::BlendSpace1D& space = characterDefinition.locomotionBlendSpace;
+        space.samples.clear();
+        for (const auto& w : wanted)
+        {
+            const int32_t index = FindClipIndex(clips, w.clip);
+            if (index < 0)
+            {
+                Foundation::Log::Write(
+                    Foundation::Log::Severity::Warning, "FighterState", "locomotion blend space: clip '%s' not found - skipped", w.clip);
+                continue;
+            }
+            space.samples.push_back(Engine::BlendSpace1DSample{ index, w.param });
+        }
+        std::sort(
+            space.samples.begin(), space.samples.end(),
+            [](const Engine::BlendSpace1DSample& a, const Engine::BlendSpace1DSample& b) { return a.param < b.param; });
+
+        Foundation::Log::Write(
+            Foundation::Log::Severity::Info, "FighterState", "locomotion blend space: %zu sample(s) over [%.2f, %.2f]",
+            space.samples.size(), space.samples.empty() ? 0.0f : space.samples.front().param,
+            space.samples.empty() ? 0.0f : space.samples.back().param);
+    }
+
+    void BuildJumpFloatMask(const Asset::Model& model, CharacterDefinition& characterDefinition)
+    {
+        // Which nodes take part in the in-place jump's sway overlay - all of them, uniformly;
+        // the per-frame amount is Animator::overlayWeight (a sine hump over the airtime), not
+        // baked here. A per-node vector rather than a bare flag so the sway can be shaped
+        // per-body-part later (e.g. calmer legs) without an API change.
+        characterDefinition.jumpFloatMask.assign(model.nodes.size(), 1.0f);
+        Foundation::Log::Write(
+            Foundation::Log::Severity::Info, "FighterState", "jump float mask: %zu node(s)", model.nodes.size());
+    }
+
     std::optional<std::string> SelectMove(const CharacterDefinition& characterDefinition, const Engine::InputHistory& inputHistory)
     {
         const Engine::InputCommand& latest = inputHistory.Latest();
@@ -737,6 +955,11 @@ namespace Game
         ApplyStateEffects(
             registry, entity, state, input.characterDefinition, input.thisTickInput, input.availableClips, input.characterModel,
             input.forceShowAllHitboxes);
+
+        // Advance the crossfade one sim tick's worth (in sim seconds, so captures are
+        // reproducible). Skipped during hitstop by the early-return at the top of this function -
+        // both fighters' blends freeze with everything else, which is correct.
+        registry.get<Engine::Animator>(entity).Advance(Engine::FixedTimestepAccumulator::kFixedDeltaSeconds);
 
         ++state.framesInState;
         if (state.currentState == "Attack")

@@ -13,7 +13,10 @@ character
         maxHealth 100
         walkSpeed 2.0
         runSpeed  4.0
-        jumpSpeed 3.0
+        # Vertical launch speed. Paired with FighterState.cpp's kGravity for a ~0.69s airtime,
+        # ~1.30 peak height - a snappy fighting-game jump. The jump clip is phase-mapped onto
+        # the arc, so this no longer needs to match any clip length.
+        jumpSpeed 7.5
     }
 
     # Render-space fix-ups for this source asset. Applied by the engine when drawing (and, where

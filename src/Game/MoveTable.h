@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CombatDsl.h"
+#include "Engine/BlendSpace.h"
 #include "Engine/Collision.h"
 
 #include <DirectXMath.h>
@@ -109,8 +110,10 @@ namespace Game
         int32_t maxHealth = 100;
         float walkSpeed = 2.0f;
         float runSpeed = 4.0f;
-        float jumpSpeed = 3.0f; // Initial vertical launch speed for Jump - paired with FighterState.cpp's
+        float jumpSpeed = 7.5f; // Initial vertical launch speed for Jump - paired with FighterState.cpp's
                                  // kGravity, which a jump's total airtime (2*jumpSpeed/kGravity) is derived from.
+                                 // ~0.69s airtime / ~1.30 peak with today's kGravity; the jump clip is
+                                 // phase-mapped onto that arc so airtime need not match any clip's length.
     };
 
     // A fighter entity is instantiated FROM this, never hand-assembled per-character in code.
@@ -175,6 +178,22 @@ namespace Game
         float koDropOffsetY = 0.0f;
         uint32_t koDropStartFrame = 0;
         uint32_t koDropEndFrame = 0;
+
+        // Locomotion blend space (idle/walk_forward/walk_backward/running keyed on signed
+        // movement speed), built once at load by Game::BuildLocomotionBlendSpace from this
+        // character's clips + walk/run stats. The animation source for the Idle/Walk/Run states.
+        // Empty (no samples) if none of the expected clips are present - then those states fall
+        // back to the bind pose.
+        Engine::BlendSpace1D locomotionBlendSpace;
+
+        // Per-node participation weights [0,1] for the in-place jump's sway overlay, built once
+        // at load by Game::BuildJumpFloatMask. The in-place jump holds a single frame of its
+        // clip and blends toward a later frame of the same clip by a sine hump over the airtime
+        // (Animator::overlayWeight) - one smooth rise-and-settle rather than the clip playing
+        // back, which loops the limbs rapidly at this playback rate. This mask selects which
+        // nodes take part (uniform 1.0 today; a per-node vector so it can be shaped per
+        // body-part later). Indexed like Asset::Model::nodes; empty -> no overlay.
+        std::vector<float> jumpFloatMask;
     };
 
     // Maps a parsed CombatFile's stringly-typed MoveDecls onto real MoveDefinition fields.

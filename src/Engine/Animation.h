@@ -15,6 +15,67 @@ namespace Asset
 
 namespace Engine
 {
+    // One node's local-space transform, as separate T/R/S so poses can be blended
+    // component-wise (lerp T/S, slerp R) - a matrix can't be meaningfully interpolated.
+    // Layout matches Asset::Node's own fields.
+    struct NodeLocal
+    {
+        DirectX::XMFLOAT3 translation = { 0.0f, 0.0f, 0.0f };
+        DirectX::XMFLOAT4 rotation = { 0.0f, 0.0f, 0.0f, 1.0f }; // Identity quaternion.
+        DirectX::XMFLOAT3 scale = { 1.0f, 1.0f, 1.0f };
+    };
+
+    // A full-skeleton local-space pose - one NodeLocal per Asset::Model node, indexed the same
+    // way. The unit the animation runtime samples, blends, and layers before any hierarchy
+    // composition happens. An empty `nodes` means "not sampled" (ComposePoseToWorld then falls
+    // back to the model's rest pose).
+    struct Pose
+    {
+        std::vector<NodeLocal> nodes;
+    };
+
+    // Sample every animation channel of `clip` at timeSeconds into a local-space Pose. A node
+    // the clip doesn't animate keeps the model's own rest-pose local TRS; a node the clip
+    // animates on only some components keeps its rest value for the others - same fallback rule
+    // the fused walk always had. clip == nullptr yields the pure bind/rest pose. timeSeconds is
+    // wrapped/looped against the clip's own duration, unchanged.
+    //
+    // Per-node independent (no hierarchy), so this is a flat loop over model.nodes.
+    Pose SampleClipPose(const Asset::Model& model, const Asset::Clip* clip, float timeSeconds);
+
+    // Per-node blend of two local-space poses: lerp translation/scale, shortest-path slerp
+    // rotation, weight `t` in [0,1] (clamped; t<=0 returns a, t>=1 returns b exactly). The two
+    // poses must be the same size (both indexed like Asset::Model::nodes); a mismatch returns
+    // whichever is non-empty, or `a`. This is all a plain crossfade needs; per-node masking is
+    // BlendMasked below.
+    Pose Blend(const Pose& a, const Pose& b, float t);
+
+    // Per-node blend where the weight varies by node: the effective weight for node i is
+    // `clamp(weights[i] * weightScale, 0, 1)` - how much of `overlay` node i replaces `base`
+    // node i (0 = keep base, 1 = take overlay, between = lerp T/S + shortest-path slerp R, same
+    // math as Blend). `weights` must be indexed like Asset::Model::nodes and match `base`'s
+    // size; a size mismatch (or empty weights) returns `base` unchanged. `weightScale` is a
+    // single per-frame dial over the whole mask (e.g. ramp an overlay in/out). The primitive a
+    // partial-body or additive layer is built on.
+    Pose BlendMasked(const Pose& base, const Pose& overlay, const std::vector<float>& weights, float weightScale = 1.0f);
+
+    // True only if every T/R/S component of every node is a finite number. A non-finite pose
+    // (a NaN/Inf leaking in from a degenerate clip quaternion, a poisoned blend accumulator, a
+    // bad crossfade source) composes to a garbage skinning palette and renders the mesh as a
+    // collapsed point - i.e. invisible - and, if the bad value feeds back into an accumulator,
+    // stays invisible. Callers use this as a last-line check before handing a pose to skinning,
+    // substituting the rest pose for a frame instead (see EvaluateAnimator).
+    bool PoseIsFinite(const Pose& pose);
+
+    // Compose a local-space Pose down the node hierarchy: world_i = local_i * parentWorld, each
+    // scene root starting from rootTransform. `pose` must be indexed like Asset::Model::nodes
+    // (SampleClipPose's output); an empty or wrong-sized pose uses each node's rest-pose local
+    // TRS instead. Same row-vector math and same NOT-transposed-for-GPU output contract as
+    // EvaluateNodeWorldTransforms below (which is now literally
+    // ComposePoseToWorld(model, SampleClipPose(model, clip, t), rootTransform)).
+    std::vector<DirectX::XMMATRIX> ComposePoseToWorld(
+        const Asset::Model& model, const Pose& pose, const DirectX::XMMATRIX& rootTransform = DirectX::XMMatrixIdentity());
+
     // Evaluates the world transform of every node in the model by walking the full hierarchy
     // from its scene roots down through every descendant, exactly once - the same walk
     // CreateStaticMeshDrawItems (ModelResources.h) used to do inline for bind-pose rendering,
@@ -83,23 +144,25 @@ namespace Engine
         const Asset::Skin& skin, const std::vector<DirectX::XMMATRIX>& nodeWorldTransforms,
         const DirectX::XMMATRIX& meshWorldTransform);
 
-    // Per-frame pose update: runs FK (EvaluateNodeWorldTransforms) and skinning
-    // (ComputeSkinningMatrices) for one clip/time, then Buffer::Update()s item's own
-    // bonePaletteBuffer in place - the persistent buffer Engine::CreateSkinnedMeshDrawItems
-    // creates once at load. Deliberately separate from that one-time setup: calling this every
-    // frame is exactly the point (time changes every frame), whereas re-running the one-time
-    // setup every frame would re-upload the vertex/index buffers too, leaking new GPU resources
-    // each time.
+    // Per-frame pose update: composes an already-sampled local-space Pose to world
+    // (ComposePoseToWorld), runs skinning (ComputeSkinningMatrices), then Buffer::Update()s
+    // item's own bonePaletteBuffer in place - the persistent buffer
+    // Engine::CreateSkinnedMeshDrawItems creates once at load. Deliberately separate from that
+    // one-time setup: calling this every frame is exactly the point, whereas re-running the
+    // one-time setup would re-upload the vertex/index buffers too and leak GPU resources.
     //
-    // rootTransform and meshWorldTransform are threaded straight through to
-    // EvaluateNodeWorldTransforms and ComputeSkinningMatrices respectively - see
-    // ComputeSkinningMatrices's own comment for why these are independent, caller-controlled
-    // parameters rather than one shared value derived internally.
+    // Takes a Pose (from SampleClipPose or EvaluateAnimator) rather than a clip+time, so
+    // blending/layering happens upstream in the animation runtime, not here. An empty Pose
+    // composes the model's rest pose.
+    //
+    // rootTransform and meshWorldTransform are threaded straight through to ComposePoseToWorld
+    // and ComputeSkinningMatrices respectively - see ComputeSkinningMatrices's own comment for
+    // why these are independent, caller-controlled parameters, not one shared value.
     //
     // Joints beyond skin.joints.size() (up to Renderer::kMaxSkinJoints) are left at Identity -
     // harmless since no vertex references them (see Renderer::kMaxSkinJoints's own comment for
     // the capacity/assert contract Engine::CreateSkinnedMeshDrawItems already enforces).
     void UpdateSkinnedPose(
-        const Asset::Model& model, const Asset::Skin& skin, const Asset::Clip& clip, float timeSeconds,
-        const DirectX::XMMATRIX& rootTransform, const DirectX::XMMATRIX& meshWorldTransform, Renderer::SkinnedMeshDrawItem& item);
+        const Asset::Model& model, const Asset::Skin& skin, const Pose& pose, const DirectX::XMMATRIX& rootTransform,
+        const DirectX::XMMATRIX& meshWorldTransform, Renderer::SkinnedMeshDrawItem& item);
 }

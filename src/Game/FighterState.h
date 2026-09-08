@@ -103,6 +103,17 @@ namespace Game
     // sequences yet, just single-button triggers (see MoveTable.h).
     std::optional<std::string> SelectMove(const CharacterDefinition& characterDefinition, const Engine::InputHistory& inputHistory);
 
+    // Builds characterDefinition.locomotionBlendSpace from its clips: samples for
+    // walk_backward @ -walkSpeed, idle @ 0, walk_forward @ +walkSpeed, running @ +runSpeed
+    // (any missing clip is skipped, logged). Call once at startup after the model's clips are
+    // loaded. The Idle/Walk/Run states drive their animation from this instead of one clip each.
+    void BuildLocomotionBlendSpace(const std::vector<Asset::Clip>& clips, CharacterDefinition& characterDefinition);
+
+    // Builds characterDefinition.jumpFloatMask: a per-node blend weight (uniform today) for the
+    // in-place jump - near-1 so the jump is mostly a held calm pose with only a subtle bleed of
+    // the clip's own motion. Call once at startup after the model is loaded.
+    void BuildJumpFloatMask(const Asset::Model& model, CharacterDefinition& characterDefinition);
+
     // Everything UpdateFighterState needs for one entity's one tick. thisTickInput/
     // lastCollisionEvents are the same values already produced elsewhere in the tick loop, just
     // threaded through rather than re-derived. lastCollisionEvents is deliberately the PREVIOUS

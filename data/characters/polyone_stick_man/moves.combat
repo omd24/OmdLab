@@ -1,12 +1,14 @@
 # This character's moveset - per-character content, cross-referenced from the shared state
 # topology only through generic flags (moveSelected, hitConfirmed, ...), never by name.
 #
-# startup+active+recovery must sum to (roughly) the real animationClip's own duration in frames
-# at 60Hz, or the state machine returns to Idle - cutting the visible clip short - well before it
-# actually finishes playing. Real clip durations (from the asset import log): punch = 0.667s = 40
-# frames, kick_light = 1.300s = 78 frames. First real tuning pass, still easy to retune further
-# once real play makes clear whether punch/kick feel right relative to each other - just keep the
-# three frame counts summing to the clip's own length.
+# startup + active + recovery is the Attack STATE's length in 60Hz frames (rescaled by the
+# global speed multiplier at load): how long the fighter is committed / input-locked. It is NOT
+# the clip's length. The state now ends right after the strike (startup + active), and the
+# limb's return-to-neutral plays out in interruptible Idle via the Attack->Idle crossfade -
+# so the player can walk / jump / attack again the instant the hit resolves instead of watching
+# a locked recovery animation. Keep recovery tiny (a few frames of settle) unless a move
+# deliberately wants a punishable whiff window. (punch clip 0.667s, kick_light clip 1.300s, for
+# reference - the state is far shorter than both now, by design.)
 #
 # A hitbox's optional "bone" field names a real joint (see the character's own skeleton - e.g.
 # "RightHand_014", "RightFoot_020") for the box to follow through the move's animated pose,
@@ -29,7 +31,7 @@ move punch
     inputButton Punch
     startup 8
     active 8
-    recovery 24
+    recovery 0
     damage 8
     onHitStun 14
     onBlockStun 8
@@ -45,8 +47,12 @@ move punch
         halfX 0.2
         halfY 0.15
         halfZ 0.15
-        frameStart 14
-        frameEnd 21
+        # Live window, in authored 60Hz frames (rescaled with the move at load). Must sit
+        # inside the Attack state (startup..startup+active) - the state now ends right after the
+        # strike, so a window authored past it would never open in normal play (only with the
+        # "force show all hitboxes" debug toggle, which bypasses the window check).
+        frameStart 8
+        frameEnd 16
     }
 
     cancel kick_light
@@ -60,14 +66,21 @@ move kick_light
 {
     animationClip "kick_light"
     inputButton Kick
-    startup 15
+    # Shorter windup so the slow coil doesn't dominate the move.
+    startup 10
     active 10
-    recovery 53
+    # Recovery gives the leg's return-to-neutral real time on-screen - the "recovery blend-out"
+    # crossfade (now eased, see Animator::ActiveWeight) spans it and decelerates into rest.
+    recovery 10
     damage 10
     onHitStun 16
     onBlockStun 10
     guardHeight mid
     impact heavy
+    # Windup -> full extension, in frames AFTER the 1/1.2 load-time speed scale (author ~1.2x
+    # the ticks you want). Default 3 passes through full extension in ~2 frames - too abrupt to
+    # read. 7 -> ~6 runtime ticks of rise.
+    timingSnapFrames 7
 
     hitbox
     {
@@ -78,7 +91,8 @@ move kick_light
         halfX 0.264
         halfY 0.221
         halfZ 0.18
-        frameStart 22
-        frameEnd 30
+        # See punch's hitbox note - window kept inside startup..startup+active.
+        frameStart 10
+        frameEnd 20
     }
 }

@@ -1,7 +1,7 @@
 #include "Asset/GltfImporter.h"
 #include "Engine/Animation.h"
+#include "Engine/Animator.h"
 #include "Engine/Camera.h"
-#include "Engine/ClipPlayback.h"
 #include "Engine/Collision.h"
 #include "Engine/Components.h"
 #include "Engine/Engine.h"
@@ -16,6 +16,7 @@
 #include "Renderer/Buffer.h"
 #include "Renderer/DebugDrawPass.h"
 #include "Renderer/RenderTasks.h"
+#include "CaptureRun.h"
 #include "CombatDsl.h"
 #include "FighterShadow.h"
 #include "FighterState.h"
@@ -36,6 +37,8 @@
 #include <entt.hpp>
 #include <filesystem>
 #include <imgui.h>
+#include <optional>
+#include <string>
 #include <system_error>
 #include <vector>
 
@@ -50,12 +53,37 @@ extern "C"
     __declspec(dllexport) extern const char* D3D12SDKPath = ".\\D3D12\\";
 }
 
-int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
+int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
 {
     Foundation::CreateDebugConsole("OmdLab - Debug Console");
 
     Foundation::Log::Init("logs/omdlab.log");
     Foundation::Log::Write(Foundation::Log::Severity::Info, "Game", "OmdLab starting up");
+
+    // "--capture <script>": run a deterministic scripted capture (see CaptureRun.h), then exit.
+    // Parsed here; acted on in the render loop. Script names are ASCII.
+    std::string captureScriptName;
+    {
+        const std::wstring cmd = commandLine != nullptr ? commandLine : L"";
+        const size_t flag = cmd.find(L"--capture");
+        if (flag != std::wstring::npos)
+        {
+            const size_t start = cmd.find_first_not_of(L" \t", flag + 9);
+            if (start != std::wstring::npos)
+            {
+                const size_t end = cmd.find_first_of(L" \t", start);
+                const std::wstring token = cmd.substr(start, end == std::wstring::npos ? std::wstring::npos : end - start);
+                for (const wchar_t wc : token)
+                {
+                    // Script names are ASCII - narrow one char at a time, dropping anything else.
+                    if (wc > 0 && wc < 128)
+                    {
+                        captureScriptName += static_cast<char>(wc);
+                    }
+                }
+            }
+        }
+    }
 
     Engine::PrintDependencyChain();
 
@@ -183,6 +211,14 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
         // above, Finalize needs Analyze's detected fractions.
         Game::AnalyzeMoveTiming(characterModel, characterModel.clips, characterDefinition.moveTable);
         Game::FinalizeMoveTiming(characterDefinition.moveTable);
+        // Locomotion blend space (idle/walk/run by signed movement speed) - the animation
+        // source for the Idle/Walk/Run states. Built per CharacterDefinition (both already
+        // loaded from the same character.combat, so same clips + stats).
+        Game::BuildLocomotionBlendSpace(characterModel.clips, characterDefinition);
+        Game::BuildLocomotionBlendSpace(characterModel.clips, dummyDefinition);
+        // Per-node blend weights for the in-place jump's held-calm-pose overlay.
+        Game::BuildJumpFloatMask(characterModel, characterDefinition);
+        Game::BuildJumpFloatMask(characterModel, dummyDefinition);
 
         // Dummy already carries its own copy of every scalar field (loaded from the same
         // character.combat above), but needs its own GPU-backed draw item instance -
@@ -244,7 +280,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
             break;
         }
     }
-    registry.emplace<Engine::ClipPlayback>(characterEntity);
+    registry.emplace<Engine::Animator>(characterEntity);
 #ifdef OMD_DEV_TOOLS
     // Debug-UI clip combo contents - built once since Asset::Clip::name (and characterModel
     // itself) don't change after import. Only ever read by primaryContentUI below, so gated
@@ -272,7 +308,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     {
         if (characterModel.clips[i].name == "idle")
         {
-            registry.get<Engine::ClipPlayback>(characterEntity).clipIndex = static_cast<int32_t>(i);
+            registry.get<Engine::Animator>(characterEntity).clipIndex = static_cast<int32_t>(i);
             break;
         }
     }
@@ -304,12 +340,12 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     {
         registry.emplace<Engine::SkinnedRenderable>(dummyEntity, Engine::SkinnedRenderable{ &dummyDrawItems[0] });
     }
-    registry.emplace<Engine::ClipPlayback>(dummyEntity);
+    registry.emplace<Engine::Animator>(dummyEntity);
     for (size_t i = 0; i < characterModel.clips.size(); ++i)
     {
         if (characterModel.clips[i].name == "idle")
         {
-            registry.get<Engine::ClipPlayback>(dummyEntity).clipIndex = static_cast<int32_t>(i);
+            registry.get<Engine::Animator>(dummyEntity).clipIndex = static_cast<int32_t>(i);
             break;
         }
     }
@@ -466,6 +502,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     // and UpdateFighterState is skipped entirely for this entity so it can't fight back over the
     // manual selection. Off by default - real gameplay is game-driven, this is a testing aid.
     bool manualClipOverride = false;
+    bool manualClipPlaying = true; // "Playing" checkbox for the manual-override preview (the Animator has no play flag).
     // Debug aid: shows the active move's hitbox for the whole Attack state instead of gating it
     // to the move's own authored active-frame window (often well under 200ms real-time) - lets a
     // bone-attached hitbox's tracking be watched continuously via "Collision debug draw" rather
@@ -540,13 +577,92 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     bool captureDebugUIVisible = true;
     bool f9WasDown = false;
     bool ctrlRWasDown = false;
+
+    // Capture harness: the skeleton-space "effector" logged to motion.csv defaults to the
+    // right hand (an attack overrides it per tick with its own hitbox bone). Resolved once by
+    // node name; -1 if the rig has no obvious hand node, which just leaves the effector
+    // columns empty until an attack supplies a bone. Plus the previous tick's effector / COM
+    // world positions, kept across loop iterations so per-frame speed is a clean difference.
+    int captureEffectorNodeDefault = -1;
+    for (size_t i = 0; i < characterModel.nodes.size(); ++i)
+    {
+        std::string n = characterModel.nodes[i].name;
+        for (char& c : n)
+        {
+            c = (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : c;
+        }
+        if (n.find("righthand") != std::string::npos || n.find("right_hand") != std::string::npos ||
+            n.find("hand_r") != std::string::npos)
+        {
+            captureEffectorNodeDefault = static_cast<int>(i);
+            break;
+        }
+        if (captureEffectorNodeDefault < 0 && n.find("hand") != std::string::npos)
+        {
+            captureEffectorNodeDefault = static_cast<int>(i);
+        }
+    }
+    if (captureEffectorNodeDefault >= 0)
+    {
+        Foundation::Log::Write(
+            Foundation::Log::Severity::Info, "Game", "capture effector default node: %d '%s'", captureEffectorNodeDefault,
+            characterModel.nodes[static_cast<size_t>(captureEffectorNodeDefault)].name.c_str());
+    }
+    DirectX::XMVECTOR capturePrevEffector = DirectX::XMVectorZero();
+    DirectX::XMVECTOR capturePrevCom = DirectX::XMVectorZero();
+    bool captureSkeletonHasPrev = false;
+
+    // "--capture <script>": a deterministic scripted capture run - one sim tick per render
+    // frame at the fixed timestep, scripted player input, debug UI off, exit when done.
+    std::optional<Game::CaptureRun> captureRun;
+    if (!captureScriptName.empty())
+    {
+        if (Game::CaptureRun::IsKnownScript(captureScriptName))
+        {
+            captureRun.emplace(captureScriptName);
+            registry.get<Engine::Transform>(characterEntity) = Engine::Transform{};
+            registry.replace<Game::FighterState>(characterEntity, Game::FighterState{});
+            registry.replace<Game::Health>(
+                characterEntity, Game::Health{ characterDefinition.stats.maxHealth, characterDefinition.stats.maxHealth });
+            registry.get<Engine::Transform>(dummyEntity) = Engine::Transform{ { 2.0f, 0.0f, 0.0f } };
+            registry.replace<Game::FighterState>(dummyEntity, Game::FighterState{});
+            registry.replace<Game::Health>(
+                dummyEntity, Game::Health{ dummyDefinition.stats.maxHealth, dummyDefinition.stats.maxHealth });
+            lastCollisionEvents = Engine::CollisionEvents{};
+            simClock.accumulatedSeconds = 0.0f;
+            // Camera pre-settled on the fighters' midpoint (player x=0, dummy x=2), follow ON.
+            // Pre-positioning kills the first-~15-frames ease-in transient that otherwise
+            // dominates motion.csv; follow then keeps a moving fighter (Walk/Run scripts) in
+            // frame, and its motion is deterministic under the fixed capture timestep.
+            camera = Engine::Camera{};
+            camera.position.x = 1.0f;
+            enableCameraFollow = true;
+            captureDebugUIVisible = false;
+        }
+        else
+        {
+            Foundation::Log::Write(
+                Foundation::Log::Severity::Error, "Game", "--capture: unknown script '%s' (known: %s)", captureScriptName.c_str(),
+                Game::CaptureRun::KnownScriptList().c_str());
+        }
+    }
 #endif
 
     while (Foundation::PumpMessages())
     {
         const auto now = std::chrono::steady_clock::now();
-        const float deltaSeconds = std::chrono::duration<float>(now - lastFrameTime).count();
+        float deltaSeconds = std::chrono::duration<float>(now - lastFrameTime).count();
         lastFrameTime = now;
+
+#ifdef OMD_DEV_TOOLS
+        // A capture run is lockstep: pin the frame delta to one fixed tick, so "tick N" is the
+        // same image every run (camera-follow and clip playback both key off this delta).
+        if (captureRun)
+        {
+            deltaSeconds = Engine::FixedTimestepAccumulator::kFixedDeltaSeconds;
+            captureDebugUIVisible = false;
+        }
+#endif
 
 #ifdef OMD_DEV_TOOLS
         {
@@ -659,8 +775,19 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
 #else
             const bool ignoreGamepadAnalogAxis = false;
 #endif
-            lastInputCommand = Engine::AssembleInputCommand(
-                simClock.tickCount, fighterBindings, lastInputCommand, /*gamepadIndex*/ 0, ignoreGamepadAnalogAxis);
+#ifdef OMD_DEV_TOOLS
+            if (captureRun)
+            {
+                // Scripted player input for this tick - bypasses the real device path entirely.
+                lastInputCommand = captureRun->InputForTick(simClock.tickCount);
+                lastInputCommand.tick = simClock.tickCount;
+            }
+            else
+#endif
+            {
+                lastInputCommand = Engine::AssembleInputCommand(
+                    simClock.tickCount, fighterBindings, lastInputCommand, /*gamepadIndex*/ 0, ignoreGamepadAnalogAxis);
+            }
             playerInputHistory.Push(lastInputCommand);
 
             // Debug readout only for now (Phase 3) - only overwritten on an actual selection
@@ -883,19 +1010,34 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
                 Renderer::Buffer::Update(drawItem.worldBuffer, &worldForGpu, sizeof(worldForGpu));
             }
 
-            Engine::ClipPlayback& playback = registry.get<Engine::ClipPlayback>(entity);
-            const Asset::Clip& clip = characterModel.clips[playback.clipIndex];
+            Engine::Animator& animator = registry.get<Engine::Animator>(entity);
             // Manual override restores the pre-state-machine behavior for this entity only:
-            // wall-clock Advance(), same as every other clip preview in this app - lets one clip
-            // be eyeballed in isolation without the state machine (skipped above) setting
-            // playbackTimeSeconds itself.
+            // wall-clock advance of one clip in isolation (the state machine, skipped above,
+            // isn't setting the time). No crossfade in this mode - it's a raw clip preview.
             if (advanceManually)
             {
-                playback.Advance(deltaSeconds, clip.durationSeconds);
+                animator.useBlendSpace = false;
+                animator.prevPose.nodes.clear();
+                animator.blendRemaining = 0.0f;
+                animator.overlayClipIndex = -1; // raw single-clip preview - no masked overlay
+                animator.overlayMask = nullptr;
+                if (manualClipPlaying)
+                {
+                    const float dur =
+                        (animator.clipIndex >= 0 && animator.clipIndex < static_cast<int32_t>(characterModel.clips.size()))
+                            ? characterModel.clips[static_cast<size_t>(animator.clipIndex)].durationSeconds
+                            : 0.0f;
+                    float t = animator.clipSeconds + deltaSeconds;
+                    if (dur > 0.0f)
+                    {
+                        t = std::fmod(t, dur);
+                    }
+                    animator.clipSeconds = t;
+                }
             }
+            const Engine::Pose pose = Engine::EvaluateAnimator(animator, characterModel, characterModel.clips);
             Engine::UpdateSkinnedPose(
-                characterModel, *characterSkin, clip, playback.playbackTimeSeconds, DirectX::XMMatrixIdentity(),
-                DirectX::XMMatrixIdentity(), drawItem);
+                characterModel, *characterSkin, pose, DirectX::XMMatrixIdentity(), DirectX::XMMatrixIdentity(), drawItem);
         };
         // +180 degrees when facing left (see FighterState::facingRight's own comment) - same
         // convention FighterState.cpp's ResolveHitboxOffset uses, so the rendered mesh and its
@@ -954,15 +1096,16 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
                 // made below on the very next tick. Flip this on to preview one clip in
                 // isolation, same workflow as before the state machine existed.
                 ImGui::Checkbox("Manual clip override", &manualClipOverride);
-                Engine::ClipPlayback& characterPlayback = registry.get<Engine::ClipPlayback>(characterEntity);
-                int clipIndex = characterPlayback.clipIndex;
+                Engine::Animator& characterAnimator = registry.get<Engine::Animator>(characterEntity);
+                int clipIndex = characterAnimator.clipIndex;
                 ImGui::BeginDisabled(!manualClipOverride);
                 if (ImGui::Combo("Clip", &clipIndex, characterClipNames.data(), static_cast<int>(characterClipNames.size())))
                 {
-                    characterPlayback.clipIndex = clipIndex;
-                    characterPlayback.playbackTimeSeconds = 0.0f;
+                    characterAnimator.useBlendSpace = false;
+                    characterAnimator.clipIndex = clipIndex;
+                    characterAnimator.clipSeconds = 0.0f;
                 }
-                ImGui::Checkbox("Playing", &characterPlayback.playing);
+                ImGui::Checkbox("Playing", &manualClipPlaying);
                 // Scrub + readout. Drag to a pose, read off its clip fraction - that fraction is
                 // exactly what a move's timingContact / timingWindup fields want (see
                 // NOTES/COMBAT_GUIDE.md "Making a move hit hard"). Dragging pauses playback so the
@@ -972,11 +1115,11 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
                     const float scrubDuration = characterModel.clips[static_cast<size_t>(clipIndex)].durationSeconds;
                     if (scrubDuration > 0.0f)
                     {
-                        float clipFraction = std::clamp(characterPlayback.playbackTimeSeconds / scrubDuration, 0.0f, 1.0f);
+                        float clipFraction = std::clamp(characterAnimator.clipSeconds / scrubDuration, 0.0f, 1.0f);
                         if (ImGui::SliderFloat("Scrub (clip fraction)", &clipFraction, 0.0f, 1.0f, "%.3f"))
                         {
-                            characterPlayback.playing = false;
-                            characterPlayback.playbackTimeSeconds = clipFraction * scrubDuration;
+                            manualClipPlaying = false;
+                            characterAnimator.clipSeconds = clipFraction * scrubDuration;
                         }
                         ImGui::Text(
                             "clip %.3f   frame %d / %d   %.3fs / %.3fs", clipFraction,
@@ -1269,7 +1412,107 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
             ImGui::Text("Hits: %zu  Triggers: %zu", lastCollisionEvents.hits.size(), lastCollisionEvents.triggers.size());
         };
 
-        if (Renderer::RenderTasks::DoFrame(viewProjection, primaryContentUI, debugSectionUI, captureDebugUIVisible))
+        // Feed the capture annotation / motion.csv with this frame's player-fighter state, and
+        // (in a capture run) queue a screenshot when the script says so.
+        {
+            const Game::FighterState& playerState = registry.get<Game::FighterState>(characterEntity);
+            const Engine::Animator& playerAnimator = registry.get<Engine::Animator>(characterEntity);
+            // For locomotion (blend space) the meaningful clock is the shared phase [0,1), not a
+            // clip second - the state field (Walk/Run/Idle) says which the number is.
+            const float clockValue = playerAnimator.useBlendSpace ? playerAnimator.blendPhase01 : playerAnimator.clipSeconds;
+            Engine::FrameCapture::SetContext(
+                simClock.tickCount, playerState.currentState.c_str(), playerState.framesInMove, clockValue,
+                playerState.activeMoveId.c_str());
+
+            // Skeleton-space signal for motion.csv / summary.json: recompose the player's world
+            // node transforms this tick (cheap - one entity, ~dozens of nodes, capture runs
+            // only) and report the strike effector + body centre of mass and their speeds. The
+            // effector is the active move's hitbox bone while attacking, else the resolved
+            // default hand. Runs every tick in a capture run (not just captured ones) so speed
+            // is always a one-fixed-tick difference; SetSkeleton only stages - ResolvePending
+            // records it on the frames that are actually grabbed.
+            if (captureRun && characterSkin != nullptr && !characterModel.clips.empty())
+            {
+                const Engine::Animator& capAnimator = registry.get<Engine::Animator>(characterEntity);
+                const Engine::Pose capPose = Engine::EvaluateAnimator(capAnimator, characterModel, characterModel.clips);
+                const std::vector<DirectX::XMMATRIX> capWorld =
+                    Engine::ComposePoseToWorld(characterModel, capPose, DirectX::XMMatrixIdentity());
+
+                DirectX::XMVECTOR com = DirectX::XMVectorZero();
+                for (const DirectX::XMMATRIX& m : capWorld)
+                {
+                    com = DirectX::XMVectorAdd(com, m.r[3]);
+                }
+                if (!capWorld.empty())
+                {
+                    com = DirectX::XMVectorScale(com, 1.0f / static_cast<float>(capWorld.size()));
+                }
+                // capWorld is composed from Identity (pose-local) - add the fighter's own world
+                // position so effector/COM speed and travel include locomotion and lunge, not
+                // just the pose's internal sway. Facing/grounding are skipped: the capture player
+                // faces +X the whole run and grounding is a constant Y offset, neither of which
+                // changes a distance or a speed.
+                const DirectX::XMFLOAT3& capPos = registry.get<Engine::Transform>(characterEntity).position;
+                const DirectX::XMVECTOR capPosV = DirectX::XMVectorSet(capPos.x, capPos.y, capPos.z, 0.0f);
+                com = DirectX::XMVectorAdd(com, capPosV);
+
+                int effNode = captureEffectorNodeDefault;
+                if (playerState.currentState == "Attack")
+                {
+                    if (const Game::MoveDefinition* mv = characterDefinition.moveTable.FindById(playerState.activeMoveId))
+                    {
+                        for (const Game::MoveHitboxDef& hb : mv->hitboxes)
+                        {
+                            if (hb.resolvedJointIndex >= 0)
+                            {
+                                effNode = hb.resolvedJointIndex;
+                                break;
+                            }
+                        }
+                    }
+                }
+                const bool effValid = effNode >= 0 && effNode < static_cast<int>(capWorld.size());
+                const DirectX::XMVECTOR effPos = effValid
+                                                     ? DirectX::XMVectorAdd(capWorld[static_cast<size_t>(effNode)].r[3], capPosV)
+                                                     : DirectX::XMVectorZero();
+
+                constexpr float capDt = Engine::FixedTimestepAccumulator::kFixedDeltaSeconds;
+                float effSpeed = 0.0f;
+                float comSpeed = 0.0f;
+                if (captureSkeletonHasPrev)
+                {
+                    effSpeed =
+                        DirectX::XMVectorGetX(DirectX::XMVector3Length(DirectX::XMVectorSubtract(effPos, capturePrevEffector))) /
+                        capDt;
+                    comSpeed =
+                        DirectX::XMVectorGetX(DirectX::XMVector3Length(DirectX::XMVectorSubtract(com, capturePrevCom))) / capDt;
+                }
+                const float effReach =
+                    DirectX::XMVectorGetX(DirectX::XMVector3Length(DirectX::XMVectorSubtract(effPos, com)));
+
+                DirectX::XMFLOAT3 e3;
+                DirectX::XMFLOAT3 c3;
+                DirectX::XMStoreFloat3(&e3, effPos);
+                DirectX::XMStoreFloat3(&c3, com);
+                Engine::FrameCapture::SetSkeleton(effValid, &e3.x, effSpeed, effReach, &c3.x, comSpeed);
+
+                capturePrevEffector = effPos;
+                capturePrevCom = com;
+                captureSkeletonHasPrev = true;
+            }
+
+            if (captureRun)
+            {
+                std::string caption;
+                if (captureRun->CaptureThisTick(simClock.tickCount, caption))
+                {
+                    Engine::FrameCapture::Grab(caption);
+                }
+            }
+        }
+
+        if (Renderer::RenderTasks::DoFrame(
+                viewProjection, primaryContentUI, debugSectionUI, captureDebugUIVisible, Engine::FrameCapture::AnnotationText()))
         {
             camera = Engine::Camera{};
             enableCameraFollow = true;
@@ -1316,10 +1559,19 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
         Renderer::RenderTasks::DoFrame(viewProjection);
 #endif
 
-        // Encode + write any screenshot queued this frame (F9 / a future scripted capture).
-        // No-op unless FrameCapture::Grab was called; the readback it reads is valid now that
+        // Encode + write any screenshot queued this frame (F9 or a scripted capture). No-op
+        // unless FrameCapture::Grab was called; the readback it reads is valid now that
         // DoFrame's EndFrame has presented and waited on the GPU.
         Engine::FrameCapture::ResolvePending();
+
+#ifdef OMD_DEV_TOOLS
+        if (captureRun && captureRun->Finished(simClock.tickCount))
+        {
+            captureRun->Finish(); // writes motion.csv
+            Foundation::Log::Write(Foundation::Log::Severity::Info, "Game", "--capture: run '%s' complete, exiting", captureRun->Name().c_str());
+            break;
+        }
+#endif
     }
 
     Renderer::RenderTasks::Shutdown();

@@ -111,14 +111,30 @@ namespace Renderer
         // this call, just around constructing the lambdas it passes in.
         // showDebugUI (dev-tools builds only): when false, the "Renderer Debug" window and the
         // caller's primary/debug UI lambdas are skipped for this frame - ImGui still runs (an
-        // empty frame), so anything drawn straight onto its foreground draw list (e.g. a capture
-        // annotation) still shows. Lets a screenshot be taken without the panel in it.
+        // empty frame), so anything drawn straight onto its foreground draw list (e.g. the
+        // annotation below) still shows. Lets a screenshot be taken without the panel in it.
+        //
+        // annotationText (dev-tools builds only): a short line drawn top-left on the ImGui
+        // foreground draw list, over everything and regardless of showDebugUI - so a captured
+        // frame carries its own sim tick / state. Null or empty draws nothing.
         static bool DoFrame(
             const DirectX::XMFLOAT4X4& viewProjection, const std::function<void()>& primaryContentUI = {},
-            const std::function<void()>& debugSectionUI = {}, bool showDebugUI = true)
+            const std::function<void()>& debugSectionUI = {}, bool showDebugUI = true, const char* annotationText = nullptr)
         {
 #ifdef OMD_DEV_TOOLS
             ImGuiHelper::NewFrame();
+
+            if (annotationText != nullptr && annotationText[0] != '\0')
+            {
+                ImDrawList* fg = ImGui::GetForegroundDrawList();
+                const ImVec2 pad(6.0f, 4.0f);
+                const ImVec2 textPos(8.0f, 8.0f);
+                const ImVec2 textSize = ImGui::CalcTextSize(annotationText);
+                fg->AddRectFilled(
+                    ImVec2(textPos.x - pad.x, textPos.y - pad.y), ImVec2(textPos.x + textSize.x + pad.x, textPos.y + textSize.y + pad.y),
+                    IM_COL32(0, 0, 0, 170));
+                fg->AddText(textPos, IM_COL32(255, 255, 255, 255), annotationText);
+            }
 
             // Off by default - this is bring-up-only debug UI (a window rendering alone
             // doesn't prove mouse/keyboard input is actually reaching ImGui, toggling these

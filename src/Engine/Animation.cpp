@@ -1,11 +1,15 @@
 #include "Animation.h"
 
+#include "BlendSpace.h"
+
 #include "Asset/Clip.h"
 #include "Asset/Model.h"
 #include "Asset/Skin.h"
 #include "Renderer/Buffer.h"
 
+#include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <unordered_map>
 
@@ -86,44 +90,38 @@ namespace
         return DirectX::XMQuaternionNormalize(DirectX::XMVectorLerp(a, b, bracket.blend));
     }
 
-    struct AnimationContext
+    // Rest-pose local TRS for one node, as the XMVECTORs the sampling code works in. Every
+    // sampled component overwrites the matching lane below.
+    void LoadRestLocal(const Asset::Node& node, DirectX::XMVECTOR& scale, DirectX::XMVECTOR& rotation, DirectX::XMVECTOR& translation)
     {
-        const Asset::Clip* clip = nullptr;
-        float timeSeconds = 0.0f;
-        const std::unordered_map<int32_t, std::vector<const Asset::AnimationChannel*>>* channelsByNode = nullptr;
-    };
+        scale = DirectX::XMLoadFloat3(&node.scale);
+        rotation = DirectX::XMLoadFloat4(&node.rotation);
+        translation = DirectX::XMLoadFloat3(&node.translation);
+    }
 
-    // Same "local = Scale*Rotate*Translate, world = local*parentWorld" composition
-    // CreateStaticMeshDrawItems used to do inline - kept identical for bind pose (animContext
-    // with a null clip), which is what this refactor was verified against. With a clip active,
-    // each TRS component is taken from the clip's own channel targeting this node, if any -
-    // any component the clip doesn't animate still falls back to the node's own rest pose.
-    void EvaluateNode(
-        const Asset::Model& model, int32_t nodeIndex, const DirectX::XMMATRIX& parentWorld, const AnimationContext& animContext,
-        std::vector<DirectX::XMMATRIX>& outWorldTransforms)
+    // Recursive hierarchy composition: world_i = local_i * parentWorld. Reads local TRS from
+    // `pose` (indexed by node), or the node's rest pose when `pose` is empty/wrong-sized. Same
+    // "local = Scale*Rotate*Translate, world = local*parentWorld" row-vector math the fused
+    // walk always used - this is that walk minus the sampling.
+    void ComposeNode(
+        const Asset::Model& model, int32_t nodeIndex, const DirectX::XMMATRIX& parentWorld, const Engine::Pose& pose,
+        bool poseUsable, std::vector<DirectX::XMMATRIX>& outWorldTransforms)
     {
         const Asset::Node& node = model.nodes[nodeIndex];
 
-        DirectX::XMVECTOR scale = DirectX::XMLoadFloat3(&node.scale);
-        DirectX::XMVECTOR rotation = DirectX::XMLoadFloat4(&node.rotation);
-        DirectX::XMVECTOR translation = DirectX::XMLoadFloat3(&node.translation);
-
-        if (animContext.clip != nullptr)
+        DirectX::XMVECTOR scale;
+        DirectX::XMVECTOR rotation;
+        DirectX::XMVECTOR translation;
+        if (poseUsable)
         {
-            const auto channelsForThisNode = animContext.channelsByNode->find(nodeIndex);
-            if (channelsForThisNode != animContext.channelsByNode->end())
-            {
-                const float time = WrapTime(animContext.timeSeconds, animContext.clip->durationSeconds);
-                for (const Asset::AnimationChannel* channel : channelsForThisNode->second)
-                {
-                    switch (channel->path)
-                    {
-                        case Asset::AnimationPath::Translation: translation = SampleVector(*channel, time); break;
-                        case Asset::AnimationPath::Scale: scale = SampleVector(*channel, time); break;
-                        case Asset::AnimationPath::Rotation: rotation = SampleQuaternion(*channel, time); break;
-                    }
-                }
-            }
+            const Engine::NodeLocal& nl = pose.nodes[static_cast<size_t>(nodeIndex)];
+            scale = DirectX::XMLoadFloat3(&nl.scale);
+            rotation = DirectX::XMLoadFloat4(&nl.rotation);
+            translation = DirectX::XMLoadFloat3(&nl.translation);
+        }
+        else
+        {
+            LoadRestLocal(node, scale, rotation, translation);
         }
 
         const DirectX::XMMATRIX local =
@@ -134,15 +132,14 @@ namespace
 
         for (int32_t childIndex : node.childNodeIndices)
         {
-            EvaluateNode(model, childIndex, world, animContext, outWorldTransforms);
+            ComposeNode(model, childIndex, world, pose, poseUsable, outWorldTransforms);
         }
     }
 }
 
 namespace Engine
 {
-    std::vector<DirectX::XMMATRIX> EvaluateNodeWorldTransforms(
-        const Asset::Model& model, const DirectX::XMMATRIX& rootTransform, const Asset::Clip* clip, float timeSeconds)
+    Pose SampleClipPose(const Asset::Model& model, const Asset::Clip* clip, float timeSeconds)
     {
         std::unordered_map<int32_t, std::vector<const Asset::AnimationChannel*>> channelsByNode;
         if (clip != nullptr)
@@ -156,14 +153,253 @@ namespace Engine
             }
         }
 
-        const AnimationContext animContext{ clip, timeSeconds, &channelsByNode };
+        const float time = clip != nullptr ? WrapTime(timeSeconds, clip->durationSeconds) : 0.0f;
+
+        Pose pose;
+        pose.nodes.resize(model.nodes.size());
+        for (size_t nodeIndex = 0; nodeIndex < model.nodes.size(); ++nodeIndex)
+        {
+            const Asset::Node& node = model.nodes[nodeIndex];
+
+            DirectX::XMVECTOR scale;
+            DirectX::XMVECTOR rotation;
+            DirectX::XMVECTOR translation;
+            LoadRestLocal(node, scale, rotation, translation);
+
+            if (clip != nullptr)
+            {
+                const auto channelsForThisNode = channelsByNode.find(static_cast<int32_t>(nodeIndex));
+                if (channelsForThisNode != channelsByNode.end())
+                {
+                    for (const Asset::AnimationChannel* channel : channelsForThisNode->second)
+                    {
+                        switch (channel->path)
+                        {
+                            case Asset::AnimationPath::Translation: translation = SampleVector(*channel, time); break;
+                            case Asset::AnimationPath::Scale: scale = SampleVector(*channel, time); break;
+                            case Asset::AnimationPath::Rotation: rotation = SampleQuaternion(*channel, time); break;
+                        }
+                    }
+                }
+            }
+
+            NodeLocal& out = pose.nodes[nodeIndex];
+            DirectX::XMStoreFloat3(&out.translation, translation);
+            DirectX::XMStoreFloat4(&out.rotation, rotation);
+            DirectX::XMStoreFloat3(&out.scale, scale);
+        }
+        return pose;
+    }
+
+    Pose Blend(const Pose& a, const Pose& b, float t)
+    {
+        if (a.nodes.empty())
+        {
+            return b;
+        }
+        if (b.nodes.empty() || a.nodes.size() != b.nodes.size())
+        {
+            return a;
+        }
+        if (t <= 0.0f)
+        {
+            return a;
+        }
+        if (t >= 1.0f)
+        {
+            return b;
+        }
+
+        Pose out;
+        out.nodes.resize(a.nodes.size());
+        for (size_t i = 0; i < a.nodes.size(); ++i)
+        {
+            const NodeLocal& na = a.nodes[i];
+            const NodeLocal& nb = b.nodes[i];
+
+            const DirectX::XMVECTOR ta = DirectX::XMLoadFloat3(&na.translation);
+            const DirectX::XMVECTOR tb = DirectX::XMLoadFloat3(&nb.translation);
+            const DirectX::XMVECTOR sa = DirectX::XMLoadFloat3(&na.scale);
+            const DirectX::XMVECTOR sb = DirectX::XMLoadFloat3(&nb.scale);
+            DirectX::XMVECTOR ra = DirectX::XMLoadFloat4(&na.rotation);
+            DirectX::XMVECTOR rb = DirectX::XMLoadFloat4(&nb.rotation);
+
+            // Shortest-path: XMQuaternionSlerp does not flip for the double cover itself, so
+            // negate one input when the pair points to opposite hemispheres (same fix
+            // SampleQuaternion applies to its own lerp).
+            if (DirectX::XMVectorGetX(DirectX::XMVector4Dot(ra, rb)) < 0.0f)
+            {
+                rb = DirectX::XMVectorNegate(rb);
+            }
+
+            NodeLocal& no = out.nodes[i];
+            DirectX::XMStoreFloat3(&no.translation, DirectX::XMVectorLerp(ta, tb, t));
+            DirectX::XMStoreFloat3(&no.scale, DirectX::XMVectorLerp(sa, sb, t));
+            DirectX::XMStoreFloat4(&no.rotation, DirectX::XMQuaternionNormalize(DirectX::XMQuaternionSlerp(ra, rb, t)));
+        }
+        return out;
+    }
+
+    Pose BlendMasked(const Pose& base, const Pose& overlay, const std::vector<float>& weights, float weightScale)
+    {
+        if (base.nodes.empty() || overlay.nodes.size() != base.nodes.size() || weights.size() != base.nodes.size())
+        {
+            return base;
+        }
+
+        Pose out;
+        out.nodes.resize(base.nodes.size());
+        for (size_t i = 0; i < base.nodes.size(); ++i)
+        {
+            const float w = std::clamp(weights[i] * weightScale, 0.0f, 1.0f);
+            if (w <= 0.0f)
+            {
+                out.nodes[i] = base.nodes[i];
+                continue;
+            }
+            if (w >= 1.0f)
+            {
+                out.nodes[i] = overlay.nodes[i];
+                continue;
+            }
+
+            const NodeLocal& na = base.nodes[i];
+            const NodeLocal& nb = overlay.nodes[i];
+
+            const DirectX::XMVECTOR ta = DirectX::XMLoadFloat3(&na.translation);
+            const DirectX::XMVECTOR tb = DirectX::XMLoadFloat3(&nb.translation);
+            const DirectX::XMVECTOR sa = DirectX::XMLoadFloat3(&na.scale);
+            const DirectX::XMVECTOR sb = DirectX::XMLoadFloat3(&nb.scale);
+            DirectX::XMVECTOR ra = DirectX::XMLoadFloat4(&na.rotation);
+            DirectX::XMVECTOR rb = DirectX::XMLoadFloat4(&nb.rotation);
+
+            if (DirectX::XMVectorGetX(DirectX::XMVector4Dot(ra, rb)) < 0.0f)
+            {
+                rb = DirectX::XMVectorNegate(rb);
+            }
+
+            NodeLocal& no = out.nodes[i];
+            DirectX::XMStoreFloat3(&no.translation, DirectX::XMVectorLerp(ta, tb, w));
+            DirectX::XMStoreFloat3(&no.scale, DirectX::XMVectorLerp(sa, sb, w));
+            DirectX::XMStoreFloat4(&no.rotation, DirectX::XMQuaternionNormalize(DirectX::XMQuaternionSlerp(ra, rb, w)));
+        }
+        return out;
+    }
+
+    bool PoseIsFinite(const Pose& pose)
+    {
+        for (const NodeLocal& n : pose.nodes)
+        {
+            if (!std::isfinite(n.translation.x) || !std::isfinite(n.translation.y) || !std::isfinite(n.translation.z) ||
+                !std::isfinite(n.rotation.x) || !std::isfinite(n.rotation.y) || !std::isfinite(n.rotation.z) ||
+                !std::isfinite(n.rotation.w) || !std::isfinite(n.scale.x) || !std::isfinite(n.scale.y) || !std::isfinite(n.scale.z))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    namespace
+    {
+        const Asset::Clip* ClipAt(const std::vector<Asset::Clip>& clips, int32_t index)
+        {
+            return (index >= 0 && index < static_cast<int32_t>(clips.size())) ? &clips[static_cast<size_t>(index)] : nullptr;
+        }
+
+        // Index of the first sample with param >= `param`, i.e. the upper end of the bracket.
+        // 0 means "at or below the first sample", samples.size() means "at or above the last".
+        size_t UpperBracket(const BlendSpace1D& space, float param)
+        {
+            size_t i = 0;
+            while (i < space.samples.size() && space.samples[i].param < param)
+            {
+                ++i;
+            }
+            return i;
+        }
+    }
+
+    Pose EvaluateBlendSpace1D(
+        const BlendSpace1D& space, float param, float phase01, const Asset::Model& model, const std::vector<Asset::Clip>& clips)
+    {
+        if (space.samples.empty())
+        {
+            return SampleClipPose(model, nullptr, 0.0f);
+        }
+
+        const auto sampleAt = [&](const BlendSpace1DSample& s) -> Pose
+        {
+            const Asset::Clip* clip = ClipAt(clips, s.clipIndex);
+            const float duration = clip != nullptr ? clip->durationSeconds : 0.0f;
+            return SampleClipPose(model, clip, phase01 * duration);
+        };
+
+        const size_t upper = UpperBracket(space, param);
+        if (upper == 0)
+        {
+            return sampleAt(space.samples.front());
+        }
+        if (upper >= space.samples.size())
+        {
+            return sampleAt(space.samples.back());
+        }
+
+        const BlendSpace1DSample& lo = space.samples[upper - 1];
+        const BlendSpace1DSample& hi = space.samples[upper];
+        const float span = hi.param - lo.param;
+        const float w = span > 0.0f ? std::clamp((param - lo.param) / span, 0.0f, 1.0f) : 0.0f;
+        return Blend(sampleAt(lo), sampleAt(hi), w);
+    }
+
+    float BlendSpace1DPhaseRate(const BlendSpace1D& space, float param, const std::vector<Asset::Clip>& clips)
+    {
+        const auto rateOf = [&](const BlendSpace1DSample& s) -> float
+        {
+            const Asset::Clip* clip = ClipAt(clips, s.clipIndex);
+            const float duration = clip != nullptr ? clip->durationSeconds : 0.0f;
+            return duration > 0.0f ? 1.0f / duration : 0.0f;
+        };
+
+        if (space.samples.empty())
+        {
+            return 0.0f;
+        }
+
+        const size_t upper = UpperBracket(space, param);
+        if (upper == 0)
+        {
+            return rateOf(space.samples.front());
+        }
+        if (upper >= space.samples.size())
+        {
+            return rateOf(space.samples.back());
+        }
+
+        const BlendSpace1DSample& lo = space.samples[upper - 1];
+        const BlendSpace1DSample& hi = space.samples[upper];
+        const float span = hi.param - lo.param;
+        const float w = span > 0.0f ? std::clamp((param - lo.param) / span, 0.0f, 1.0f) : 0.0f;
+        return rateOf(lo) + (rateOf(hi) - rateOf(lo)) * w;
+    }
+
+    std::vector<DirectX::XMMATRIX> ComposePoseToWorld(
+        const Asset::Model& model, const Pose& pose, const DirectX::XMMATRIX& rootTransform)
+    {
+        const bool poseUsable = pose.nodes.size() == model.nodes.size();
 
         std::vector<DirectX::XMMATRIX> worldTransforms(model.nodes.size(), DirectX::XMMatrixIdentity());
         for (int32_t rootIndex : model.rootNodeIndices)
         {
-            EvaluateNode(model, rootIndex, rootTransform, animContext, worldTransforms);
+            ComposeNode(model, rootIndex, rootTransform, pose, poseUsable, worldTransforms);
         }
         return worldTransforms;
+    }
+
+    std::vector<DirectX::XMMATRIX> EvaluateNodeWorldTransforms(
+        const Asset::Model& model, const DirectX::XMMATRIX& rootTransform, const Asset::Clip* clip, float timeSeconds)
+    {
+        return ComposePoseToWorld(model, SampleClipPose(model, clip, timeSeconds), rootTransform);
     }
 
     std::vector<DirectX::XMMATRIX> ComputeSkinningMatrices(
@@ -186,10 +422,10 @@ namespace Engine
     }
 
     void UpdateSkinnedPose(
-        const Asset::Model& model, const Asset::Skin& skin, const Asset::Clip& clip, float timeSeconds,
-        const DirectX::XMMATRIX& rootTransform, const DirectX::XMMATRIX& meshWorldTransform, Renderer::SkinnedMeshDrawItem& item)
+        const Asset::Model& model, const Asset::Skin& skin, const Pose& pose, const DirectX::XMMATRIX& rootTransform,
+        const DirectX::XMMATRIX& meshWorldTransform, Renderer::SkinnedMeshDrawItem& item)
     {
-        const std::vector<DirectX::XMMATRIX> nodeWorldTransforms = EvaluateNodeWorldTransforms(model, rootTransform, &clip, timeSeconds);
+        const std::vector<DirectX::XMMATRIX> nodeWorldTransforms = ComposePoseToWorld(model, pose, rootTransform);
         const std::vector<DirectX::XMMATRIX> skinningMatrices = ComputeSkinningMatrices(skin, nodeWorldTransforms, meshWorldTransform);
 
         DirectX::XMFLOAT4X4 bonePalette[Renderer::kMaxSkinJoints];
