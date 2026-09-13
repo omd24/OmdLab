@@ -905,12 +905,16 @@ namespace Game
         //
         // A cancel's own DSL conditions (hitConfirmed, frame >= N, ...) only define the WINDOW a
         // cancel is legal in - they never fire it by themselves. The player must also actually
-        // press the target move's own input button on this exact tick (selectedMoveId, already
-        // computed above the same way a neutral Attack-state entry is) - otherwise a move whose
-        // cancel window is open (e.g. hit-confirmed) would auto-execute with no input at all,
-        // rather than requiring the real "Punch, then Kick" button sequence a cancel is supposed
-        // to be.
-        if (!stateChanged && state.currentState == "Attack" && selectedMoveId.has_value())
+        // press the CANCEL TARGET's own input button on this exact tick - checked directly here,
+        // not via SelectMove's result: SelectMove always resolves a button press to the first
+        // move in the table that uses it, which is exactly what a combo string wants for
+        // entering it fresh from neutral (Punch always starts "punch", not one of its own
+        // follow-ups), but is the wrong question mid-combo, where the very same button should
+        // resolve to whichever follow-up THIS move's own cancel list names. A three-hit chain on
+        // one button (e.g. Punch, Punch, Punch advancing through three different moves) needs
+        // the second and third presses read against the CURRENT move's cancels, not against
+        // SelectMove's single table-wide answer.
+        if (!stateChanged && state.currentState == "Attack")
         {
             if (const MoveDefinition* activeMove = input.characterDefinition.moveTable.FindById(state.activeMoveId))
             {
@@ -927,7 +931,13 @@ namespace Game
                 };
                 for (const CombatDsl::Cancel& cancel : activeMove->cancels)
                 {
-                    if (cancel.toMoveId == *selectedMoveId && CombatDsl::EvaluateCondition(*cancel.condition, cancelContext))
+                    const MoveDefinition* target = input.characterDefinition.moveTable.FindById(cancel.toMoveId);
+                    const std::optional<FighterButton> targetButton =
+                        target != nullptr ? ParseFighterButtonName(target->inputButton) : std::nullopt;
+                    const bool targetButtonPressedThisTick =
+                        targetButton.has_value() &&
+                        input.thisTickInput.buttons[static_cast<size_t>(*targetButton)].pressedThisTick;
+                    if (targetButtonPressedThisTick && CombatDsl::EvaluateCondition(*cancel.condition, cancelContext))
                     {
                         EnterState(state, input.characterDefinition, cancel.toMoveId);
                         break;
@@ -966,6 +976,14 @@ namespace Game
         {
             ++state.framesInMove;
         }
+    }
+
+    void ForceEnterAttackMove(
+        entt::registry& registry, entt::entity entity, const CharacterDefinition& characterDefinition, const std::string& moveId)
+    {
+        FighterState& state = registry.get<FighterState>(entity);
+        state.currentState = "Attack";
+        EnterState(state, characterDefinition, moveId);
     }
 
     void PreviewMoveHitbox(

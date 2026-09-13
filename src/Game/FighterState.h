@@ -103,6 +103,15 @@ namespace Game
     // sequences yet, just single-button triggers (see MoveTable.h).
     std::optional<std::string> SelectMove(const CharacterDefinition& characterDefinition, const Engine::InputHistory& inputHistory);
 
+    // Test/tooling hook: forces this entity directly into "Attack" playing `moveId`, bypassing
+    // SelectMove and cancels entirely. Needed for a combo-only follow-up move (one whose input
+    // button is only ever reachable via another move's cancel list, by design - SelectMove
+    // always resolves a button to the first move in the table that uses it, which is the
+    // combo's opener, not its own follow-ups) to be exercised in isolation, e.g. by the capture
+    // harness. Does the same bookkeeping a real Attack transition does (frame counters, hitbox
+    // window) and nothing more - no health/position/hitstop side effects.
+    void ForceEnterAttackMove(entt::registry& registry, entt::entity entity, const CharacterDefinition& characterDefinition, const std::string& moveId);
+
     // Builds characterDefinition.locomotionBlendSpace from its clips: samples for
     // walk_backward @ -walkSpeed, idle @ 0, walk_forward @ +walkSpeed, running @ +runSpeed
     // (any missing clip is skipped, logged). Call once at startup after the model's clips are

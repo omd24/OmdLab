@@ -42,9 +42,26 @@ namespace Game
 
         const std::string& Name() const { return m_name; }
 
+        // World-X the dummy is placed at before this run starts (see CaptureRun.cpp's
+        // BuildPlan). 2.0 by default - matches every established single-move capture, so their
+        // numbers stay comparable run to run. Combo scripts need the dummy in real hitbox range
+        // instead: a cancel only ever fires on `hitConfirmed`, and no move's reach + lunge
+        // closes a 2.0-unit gap, so at the default distance no capture has ever actually landed
+        // a hit - a combo chain would silently never advance past its first move.
+        float DummyX() const { return m_dummyX; }
+
+        // Non-empty for a script that tests one combo-only follow-up move in isolation (e.g.
+        // "hook_light") - the caller should force the player straight into Attack playing this
+        // move (Game::ForceEnterAttackMove) once, before running the plan, instead of relying
+        // on input to select it (SelectMove can't reach a combo-only move - see
+        // ForceEnterAttackMove's own comment). Empty for every other script.
+        const std::string& ForcedMove() const { return m_forcedMove; }
+
     private:
         std::string m_name;
         std::vector<TickPlan> m_plan;
         Engine::InputCommand m_idle;
+        float m_dummyX = 2.0f;
+        std::string m_forcedMove;
     };
 }

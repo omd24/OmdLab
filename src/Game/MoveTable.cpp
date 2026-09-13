@@ -173,8 +173,8 @@ namespace Game
                     }
                 }
                 // Explicit per-field overrides - an escape hatch, not the normal authoring
-                // surface (see MoveDefinition / NOTES/COMBAT_GUIDE.md). Any of these left
-                // unauthored is derived by FinalizeMoveTiming / AnalyzeMoveTiming instead.
+                // surface (see MoveDefinition). Any of these left unauthored is derived by
+                // FinalizeMoveTiming / AnalyzeMoveTiming instead.
                 else if (name == "timingContact") move.timingContactFraction = static_cast<float>(value.numberValue);
                 else if (name == "timingWindup") move.timingWindupFraction = static_cast<float>(value.numberValue);
                 else if (name == "timingSnapFrames") move.timingSnapFrames = static_cast<uint32_t>(value.numberValue);

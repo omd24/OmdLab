@@ -624,12 +624,24 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
             registry.replace<Game::FighterState>(characterEntity, Game::FighterState{});
             registry.replace<Game::Health>(
                 characterEntity, Game::Health{ characterDefinition.stats.maxHealth, characterDefinition.stats.maxHealth });
-            registry.get<Engine::Transform>(dummyEntity) = Engine::Transform{ { 2.0f, 0.0f, 0.0f } };
+            // Most scripts want the established default (2.0 - out of every move's own reach,
+            // so a solo capture never accidentally connects); a few combo scripts need the
+            // dummy in real hitbox range instead, since a cancel only ever fires on
+            // hitConfirmed (see CaptureRun::DummyX's own comment).
+            registry.get<Engine::Transform>(dummyEntity) = Engine::Transform{ { captureRun->DummyX(), 0.0f, 0.0f } };
             registry.replace<Game::FighterState>(dummyEntity, Game::FighterState{});
             registry.replace<Game::Health>(
                 dummyEntity, Game::Health{ dummyDefinition.stats.maxHealth, dummyDefinition.stats.maxHealth });
             lastCollisionEvents = Engine::CollisionEvents{};
             simClock.accumulatedSeconds = 0.0f;
+            // A combo-only follow-up move (e.g. "hook_light") has no input button reachable
+            // from neutral by design - force the player straight into it once, here, rather
+            // than relying on SelectMove (see CaptureRun::ForcedMove / ForceEnterAttackMove's
+            // own comments).
+            if (!captureRun->ForcedMove().empty())
+            {
+                Game::ForceEnterAttackMove(registry, characterEntity, characterDefinition, captureRun->ForcedMove());
+            }
             // Camera pre-settled on the fighters' midpoint (player x=0, dummy x=2), follow ON.
             // Pre-positioning kills the first-~15-frames ease-in transient that otherwise
             // dominates motion.csv; follow then keeps a moving fighter (Walk/Run scripts) in
@@ -1107,9 +1119,8 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
                 }
                 ImGui::Checkbox("Playing", &manualClipPlaying);
                 // Scrub + readout. Drag to a pose, read off its clip fraction - that fraction is
-                // exactly what a move's timingContact / timingWindup fields want (see
-                // NOTES/COMBAT_GUIDE.md "Making a move hit hard"). Dragging pauses playback so the
-                // pose holds still while it's read.
+                // exactly what a move's timingContact / timingWindup fields want. Dragging pauses
+                // playback so the pose holds still while it's read.
                 if (clipIndex >= 0 && clipIndex < static_cast<int>(characterModel.clips.size()))
                 {
                     const float scrubDuration = characterModel.clips[static_cast<size_t>(clipIndex)].durationSeconds;

@@ -23,7 +23,7 @@
 # frozen hold -> fast recovery) plus a contact freeze-frame and a forward step, all scaled by
 # that one setting. Omit it (or `impact none`) and the clip plays flat, exactly as before.
 # Where the strike / coil poses actually are in each clip is auto-detected at load from the
-# hitbox bone - nothing to hand-find. See NOTES/COMBAT_GUIDE.md.
+# hitbox bone - nothing to hand-find.
 
 move punch
 {
@@ -55,10 +55,102 @@ move punch
         frameEnd 16
     }
 
+    # Same button (Punch) can cancel to either follow-up below - which one fires depends only
+    # on which of THEIR own cancel conditions is met first (both require the same frame here,
+    # so in practice whichever the DSL evaluates first wins if both are somehow legal on the
+    # same tick, which they aren't - hitConfirmed plus the button press already disambiguates
+    # in practice, since only one attack is active at a time).
     cancel kick_light
     {
         require hitConfirmed
         require frame >= 10
+    }
+    cancel hook_light
+    {
+        require hitConfirmed
+        require frame >= 10
+    }
+}
+
+move hook_light
+{
+    # Punch-chain follow-up: punch, punch. Same striking hand as "punch" (confirmed by
+    # sampling which bone actually travels furthest during this clip, not assumed).
+    animationClip "hook_light"
+    inputButton Punch
+    # A hook's own strike is a lateral/rotational arc, not a forward reach - this clip's resting
+    # guard stance holds the hand FARTHER from the body than the actual punch-out does, so the
+    # auto-detect (furthest-from-centroid) locks onto the guard pose instead of the strike.
+    # Pinned from the real coil-then-snap instead: reach dips (coil) around clip fraction 0.41,
+    # then a local rise (the strike) around 0.51.
+    timingWindup 0.41
+    timingContact 0.51
+    startup 8
+    active 8
+    recovery 0
+    damage 9
+    onHitStun 14
+    onBlockStun 8
+    guardHeight mid
+    impact medium
+
+    hitbox
+    {
+        bone "LeftHand_010"
+        offsetX 0.282
+        offsetY 0
+        offsetZ 0
+        halfX 0.2
+        halfY 0.15
+        halfZ 0.15
+        frameStart 8
+        frameEnd 16
+    }
+
+    cancel hook_heavy
+    {
+        require hitConfirmed
+        require frame >= 10
+    }
+    cancel kick_heavy
+    {
+        require hitConfirmed
+        require frame >= 10
+    }
+}
+
+move hook_heavy
+{
+    # Punch-chain ender: punch, punch, punch. Heavier commitment (impact heavy, more recovery)
+    # than the two hits leading into it - no cancels of its own, the string ends here.
+    animationClip "hook_heavy"
+    inputButton Punch
+    # Auto-detect's furthest-from-centroid pick (contact~0.74) turned out to be a second,
+    # unrelated bump later in the clip, not the real hook - same lateral-vs-forward-reach issue
+    # hook_light had. Pinned from the real coil-then-snap: reach dips (coil) at clip fraction
+    # 0.33 (this part DID match the auto-detect), then a sharp, clean peak at 0.41 - the snap.
+    timingWindup 0.33
+    timingContact 0.41
+    startup 10
+    active 10
+    recovery 8
+    damage 16
+    onHitStun 18
+    onBlockStun 12
+    guardHeight mid
+    impact heavy
+
+    hitbox
+    {
+        bone "LeftHand_010"
+        offsetX 0.282
+        offsetY 0
+        offsetZ 0
+        halfX 0.2
+        halfY 0.15
+        halfZ 0.15
+        frameStart 10
+        frameEnd 20
     }
 }
 
@@ -82,6 +174,12 @@ move kick_light
     # read. 7 -> ~6 runtime ticks of rise.
     timingSnapFrames 7
 
+    cancel kick_low
+    {
+        require hitConfirmed
+        require frame >= 12
+    }
+
     hitbox
     {
         bone "LeftFoot_017"
@@ -92,6 +190,79 @@ move kick_light
         halfY 0.221
         halfZ 0.18
         # See punch's hitbox note - window kept inside startup..startup+active.
+        frameStart 10
+        frameEnd 20
+    }
+}
+
+move kick_low
+{
+    # Kick-chain follow-up: kick, kick. A low kick - must be blocked crouching, not standing.
+    # Uses the OTHER leg than kick_light (confirmed by sampling which foot actually travels
+    # furthest during this clip - it isn't always the same one clip to clip).
+    animationClip "kick_low_crouch"
+    inputButton Kick
+    startup 8
+    active 8
+    recovery 0
+    damage 8
+    onHitStun 14
+    onBlockStun 8
+    guardHeight low
+    impact medium
+    # Default snap let this one snap out abruptly - same fix kick_light needed.
+    timingSnapFrames 9
+
+    hitbox
+    {
+        bone "RightFoot_020"
+        # A crouching low kick keeps the foot lower and doesn't reach as far forward as a
+        # standing kick - kick_light's own box (unchanged offsetY 0.2) never connected here even
+        # with the dummy in point-blank range. Lower + a touch more reach as a first guess;
+        # retune with the in-engine hitbox tuning tool + collision debug-draw once it's visible.
+        offsetX 0.15
+        offsetY 0.0
+        offsetZ 0
+        halfX 0.3
+        halfY 0.221
+        halfZ 0.18
+        frameStart 8
+        frameEnd 16
+    }
+
+    cancel kick_heavy
+    {
+        require hitConfirmed
+        require frame >= 10
+    }
+}
+
+move kick_heavy
+{
+    # Kick-chain ender: kick, kick, kick. Also the ender for punch, punch, kick (hook_light's
+    # own cancel list points here too). Same other-leg finding as kick_low.
+    animationClip "kick_heavy"
+    inputButton Kick
+    startup 10
+    active 10
+    recovery 10
+    damage 18
+    onHitStun 18
+    onBlockStun 12
+    guardHeight mid
+    impact heavy
+    # Default snap let this one snap out abruptly - same fix kick_light needed.
+    timingSnapFrames 10
+
+    hitbox
+    {
+        bone "RightFoot_020"
+        offsetX 0.087
+        offsetY 0.2
+        offsetZ 0
+        halfX 0.264
+        halfY 0.221
+        halfZ 0.18
         frameStart 10
         frameEnd 20
     }

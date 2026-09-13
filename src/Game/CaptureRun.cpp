@@ -49,6 +49,21 @@ namespace
             out.push_back(releaseFrame);
         }
 
+        // `times` one-tick taps back to back (2*times ticks). A single precisely-timed Tap()
+        // into a cancel window is fragile: landing a hit against a stationary dummy holds the
+        // hitbox and hurtbox overlapping for the box's whole active window, and each tick they
+        // still overlap re-freezes hitstop, so the exact tick a cancel's `frame >= N` condition
+        // first becomes true shifts by a few ticks run to run depending on the hit's own timing
+        // - not something a combo script should have to predict exactly. Repeated presses across
+        // a span comfortably wider than the cancel window catch it regardless of that drift.
+        void TapRepeated(FighterButton button, unsigned times)
+        {
+            for (unsigned i = 0; i < times; ++i)
+            {
+                Tap(button);
+            }
+        }
+
         // Mark the last `count` appended ticks as capture frames with the given caption; if the
         // plan is shorter it also extends it (idle ticks) up to `count`.
         void CaptureLast(unsigned count, const char* caption)
@@ -91,9 +106,13 @@ namespace
         }
     };
 
-    // total ~= settle + move length in ticks (60Hz). Kept a touch longer than the move so its
-    // full recovery is captured. Move lengths after the 1/1.2 load-time speed scale: punch ~33,
-    // kick_light ~55.
+    // total ~= lead-in + move length + settle, in ticks (60Hz). Kept a touch longer than the
+    // move so its full recovery is captured. Move lengths after the 1/1.2 load-time speed
+    // scale: punch ~33, kick_light ~55. CaptureLast's count is bumped a few ticks past the
+    // move's own length so it also grabs the tail of the pre-tap Wait() as genuinely idle
+    // lead-in frames, not just the move itself - a capture that starts already mid-coil has
+    // no quiet baseline before it, which undersells how much this state actually moves versus
+    // its own rest pose.
     std::vector<Game::CaptureRun::TickPlan> BuildPlan(const std::string& name)
     {
         Builder b;
@@ -106,14 +125,14 @@ namespace
             b.Wait(14);
             b.Tap(FighterButton::Punch);
             b.Wait(48);
-            b.CaptureLast(50, "punch");
+            b.CaptureLast(58, "punch"); // +8 idle lead-in ticks before the tap
         }
         else if (name == "kick")
         {
             b.Wait(14);
             b.Tap(FighterButton::Kick);
             b.Wait(78);
-            b.CaptureLast(80, "kick");
+            b.CaptureLast(88, "kick"); // +8 idle lead-in ticks before the tap
         }
         else if (name == "punchkick")
         {
@@ -154,12 +173,94 @@ namespace
             b.Wait(150);
             b.CaptureLast(160, "jumpfwd");
         }
+        // hook_light / hook_heavy / kick_low / kick_heavy are combo-only follow-ups - no input
+        // button reaches them from neutral (see ForceEnterAttackMove's own comment), so these
+        // scripts carry no taps at all: main.cpp force-enters the move once at tick 1 (see
+        // CaptureRun::ForcedMove) and the plan is just "wait long enough, capture the tail".
+        // No idle lead-in is possible here (there is no neutral entry tick to lead in to) -
+        // these start already mid-move, unlike punch/kick's own scripts.
+        else if (name == "hook_light" || name == "kick_low")
+        {
+            b.CaptureLast(40, name.c_str());
+        }
+        else if (name == "hook_heavy" || name == "kick_heavy")
+        {
+            b.CaptureLast(50, name.c_str());
+        }
+        // Combo scripts: press the same button again inside the previous move's own cancel
+        // window (require frame >= N, checked against framesInMove) while it's hitConfirmed -
+        // the dummy is placed in real hitbox range for these three only (CaptureRun::DummyX),
+        // since at the default distance no move's reach + lunge connects at all and a cancel
+        // would silently never fire.
+        //
+        // A single precisely-timed Tap() into that window turned out fragile: landing the hit
+        // holds the hitbox and hurtbox overlapping for the box's whole active window, which
+        // re-triggers hitstop on every one of those ticks against a stationary target, so
+        // exactly when `frame >= N` first reads true while NOT frozen drifts by a few ticks
+        // depending on the hit's own timing, not something worth predicting exactly. Each
+        // follow-up is a wide TapRepeated instead - it only takes one press to land inside the
+        // window, and pressing before it opens (ignored - the cancel's own condition isn't met
+        // yet) or after the move has already ended (starts a fresh neutral attack instead,
+        // visible as a second Idle->Attack entry in motion.csv rather than a same-state cancel)
+        // is easy to tell apart when checking the result.
+        else if (name == "combo_ppp") // punch, punch, punch -> punch -> hook_light -> hook_heavy
+        {
+            b.Wait(14);
+            b.Tap(FighterButton::Punch);          // punch enters
+            b.Wait(5);
+            b.TapRepeated(FighterButton::Punch, 6); // hook_light (punch's cancel, frame >= 10)
+            b.Wait(2);
+            b.TapRepeated(FighterButton::Punch, 6); // hook_heavy (hook_light's cancel, frame >= 10)
+            b.Wait(33);
+            b.CaptureLast(110, "combo_ppp");
+        }
+        else if (name == "combo_kkk") // kick, kick, kick -> kick_light -> kick_low -> kick_heavy
+        {
+            b.Wait(14);
+            b.Tap(FighterButton::Kick);          // kick_light enters
+            b.Wait(7);
+            b.TapRepeated(FighterButton::Kick, 7); // kick_low (kick_light's cancel, frame >= 12)
+            b.Wait(2);
+            b.TapRepeated(FighterButton::Kick, 6); // kick_heavy (kick_low's cancel, frame >= 10)
+            b.Wait(33);
+            b.CaptureLast(120, "combo_kkk");
+        }
+        else if (name == "combo_ppk") // punch, punch, kick -> punch -> hook_light -> kick_heavy
+        {
+            b.Wait(14);
+            b.Tap(FighterButton::Punch);          // punch enters
+            b.Wait(5);
+            b.TapRepeated(FighterButton::Punch, 6); // hook_light (punch's cancel, frame >= 10)
+            b.Wait(2);
+            b.TapRepeated(FighterButton::Kick, 6);  // kick_heavy (hook_light's cancel, frame >= 10)
+            b.Wait(33);
+            b.CaptureLast(110, "combo_ppk");
+        }
         return b.out;
     }
 
-    const std::array<const char*, 8> kScripts = {
-        "idle", "punch", "kick", "punchkick", "walk", "walkhalf", "jump", "jumpfwd"
+    const std::array<const char*, 15> kScripts = {
+        "idle", "punch", "kick", "punchkick", "walk", "walkhalf", "jump", "jumpfwd",
+        "hook_light", "hook_heavy", "kick_low", "kick_heavy", "combo_ppp", "combo_kkk", "combo_ppk"
     };
+
+    // Dummy world-X for a capture run, before its plan starts (see CaptureRun::DummyX's own
+    // comment on why combo scripts need a different one).
+    float DummyXForScript(const std::string& name)
+    {
+        return name.rfind("combo_", 0) == 0 ? 1.2f : 2.0f;
+    }
+
+    // Non-empty for a script that force-enters one combo-only follow-up move directly (see
+    // CaptureRun::ForcedMove's own comment).
+    std::string ForcedMoveForScript(const std::string& name)
+    {
+        if (name == "hook_light" || name == "hook_heavy" || name == "kick_low" || name == "kick_heavy")
+        {
+            return name;
+        }
+        return {};
+    }
 }
 
 namespace Game
@@ -187,7 +288,9 @@ namespace Game
         return list;
     }
 
-    CaptureRun::CaptureRun(const std::string& scriptName) : m_name(scriptName), m_plan(BuildPlan(scriptName))
+    CaptureRun::CaptureRun(const std::string& scriptName)
+        : m_name(scriptName), m_plan(BuildPlan(scriptName)), m_dummyX(DummyXForScript(scriptName)),
+          m_forcedMove(ForcedMoveForScript(scriptName))
     {
         Engine::FrameCapture::BeginSession(scriptName);
         Foundation::Log::Write(Severity::Info, "CaptureRun", "script '%s': %zu ticks planned", scriptName.c_str(), m_plan.size());

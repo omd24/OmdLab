@@ -73,7 +73,7 @@ namespace Game
         // a contact freeze-frame and a forward step, ALL scaled by this one number.
         //   authored in .combat as: impact none|light|medium|heavy   (or a raw 0..1)
         //   -1 = not authored -> the clip plays flat, exactly as before any of this existed.
-        // This is the only game-feel field a move normally sets. See NOTES/COMBAT_GUIDE.md.
+        // This is the only game-feel field a move normally sets.
         float impact = -1.0f;
 
         // Everything below is DERIVED after load - from `impact` (Game::FinalizeMoveTiming) or
