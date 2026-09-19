@@ -47,6 +47,16 @@ namespace Game
     // (0.35) as a starting point, not because the two are required to agree.
     constexpr float kFighterBodyHalfWidth = 0.35f;
 
+    // Starting (and post-Reset) world-X gap between the player and the dummy. No move's own
+    // reach + lunge closes the old default of 2.0 at all - confirmed by capturing every move
+    // against a stationary dummy at that spacing and finding zero hits ever land, meaning a
+    // fresh match started with nothing able to connect until the player walked in first, and
+    // any hit-confirm cancel (a combo string) could never even begin. 1.6 leaves a small step-in
+    // still required (not a free opening hit) while landing inside real reach once closed.
+    // Eyeball-tuned - the in-engine hitbox tuning panel + collision debug-draw is the way to
+    // dial this further once a move's own reach changes.
+    constexpr float kDefaultFighterGapX = 1.6f;
+
     // Jump height (world Y) at which a fighter's shadow has faded to kShadowMinAlpha - roughly
     // the default character's own peak jump height (jumpSpeed^2 / (2*kGravity), ~1.25 with
     // today's defaults - see FighterState.cpp/MoveTable.h) so a full neutral jump reads as

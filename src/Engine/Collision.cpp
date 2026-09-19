@@ -72,7 +72,7 @@ namespace Engine
                     ComputeWorldAabb(hurtboxBox, defenderTransform, hurtMin, hurtMax);
                     if (AabbOverlap(hitMin, hitMax, hurtMin, hurtMax))
                     {
-                        events.hits.push_back({ attacker, defender, hitbox.moveId });
+                        events.hits.push_back({ attacker, defender, hitbox.moveId, hitbox.attackInstanceId });
                         break;
                     }
                 }

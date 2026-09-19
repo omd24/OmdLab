@@ -33,6 +33,13 @@ namespace Engine
     {
         CollisionBox box;
         uint32_t moveId = 0;
+        // Which attack OCCURRENCE this hitbox belongs to (Game::FighterState::attackInstanceId,
+        // opaque here) - carried through to HitEvent so a defender can tell "a genuinely new hit"
+        // apart from "the same still-active hitbox" without racing the attacker's own live state,
+        // which can already have moved on to its next move by the time a defender - possibly
+        // still frozen in hitstop when the attacker's hitbox was first created - gets around to
+        // reacting to a HitEvent from a prior tick. See Game::FighterState's own comment.
+        uint32_t attackInstanceId = 0;
     };
 
     // Defense volume(s) - normally present on every entity that can be hit, for its whole
@@ -59,6 +66,7 @@ namespace Engine
         entt::entity attacker = entt::null;
         entt::entity defender = entt::null;
         uint32_t moveId = 0;
+        uint32_t attackInstanceId = 0; // Copied from the Hitbox that generated this event - see its own comment.
     };
 
     struct TriggerEvent

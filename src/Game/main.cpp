@@ -335,7 +335,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
     // dev-only (see rebuildDrawItems below), same "always included" precedent groundPlaneDrawItems
     // already sets - so unlike the removed test rig, this is unconditional, not OMD_DEV_TOOLS-gated.
     const entt::entity dummyEntity = registry.create();
-    registry.emplace<Engine::Transform>(dummyEntity, Engine::Transform{ { 2.0f, 0.0f, 0.0f } });
+    registry.emplace<Engine::Transform>(dummyEntity, Engine::Transform{ { Game::kDefaultFighterGapX, 0.0f, 0.0f } });
     if (!dummyDrawItems.empty())
     {
         registry.emplace<Engine::SkinnedRenderable>(dummyEntity, Engine::SkinnedRenderable{ &dummyDrawItems[0] });
@@ -491,6 +491,14 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
     // would need reading the attacker's own FighterState, more than this testing tool needs).
     // 0 means "not currently winding up to punish."
     int dummyPunishCountdown = 0;
+    // Auto-revives the dummy a beat after it's KO'd (full health, back to Idle) instead of
+    // leaving it lying there until the Reset button is pressed - states.combat's own KO state
+    // has no transition out by design (no round-reset flow exists yet), so without this every
+    // combo-tuning session needing many repeated hits meant a manual Reset after every knockout.
+    // Defaults on since that repeated-testing case is the common one this exists for; a real
+    // "let it actually stay down" check is one click away in the panel below. Declared
+    // unconditionally, same reasoning as dummyBlocksHeld above.
+    bool dummyUndying = true;
     // Latest tick's collision resolution - read by the debug draw list below between ticks, the
     // same "store the final answer" shape lastInputCommand already uses.
     Engine::CollisionEvents lastCollisionEvents;
@@ -577,6 +585,30 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
     bool captureDebugUIVisible = true;
     bool f9WasDown = false;
     bool ctrlRWasDown = false;
+
+    // Combo debug (dev tools only): a rolling log of the player's own move-to-move transitions
+    // (fresh Attack entries and same-state cancels alike), for judging whether a combo chain
+    // actually fired or a follow-up input just missed its window - see the detection site
+    // below (right after the player's own UpdateFighterState call) for how a transition is
+    // told apart from an ordinary tick. viaCancel is kept as its own field (not baked into the
+    // formatted text) so the ImGui readout below can color a real hit-confirmed link green
+    // without re-parsing a string.
+    struct ComboHistoryEntry
+    {
+        uint32_t tick = 0;
+        bool viaCancel = false;
+        std::string moveId;
+    };
+    std::string comboPrevState = "Idle";
+    // Last-logged attackInstanceId (see FighterState.h's own comment) rather than
+    // framesInMove == 1 - hitstop freezes framesInMove pinned at 1 for a couple of ticks right
+    // after a cancel (the freeze from the PREVIOUS hit landing one tick late, same lag every
+    // other reader of lastCollisionEvents already has), and framesInMove alone can't tell "still
+    // frozen at 1" apart from "just entered" - confirmed live as the same cancel logging 2-3
+    // times in a row once hit reactions stopped silently dropping. attackInstanceId only changes
+    // on a genuine new EnterState call, immune to the freeze.
+    uint32_t comboLastLoggedInstanceId = 0;
+    std::vector<ComboHistoryEntry> comboHistory;
 
     // Capture harness: the skeleton-space "effector" logged to motion.csv defaults to the
     // right hand (an attack overrides it per tick with its own hitbox bone). Resolved once by
@@ -862,6 +894,32 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
                     Game::FighterUpdateInput{
                         lastInputCommand, playerInputHistory, lastCollisionEvents, sharedStates, characterDefinition,
                         characterModel.clips, characterModel, forceShowAllHitboxes });
+
+                // Combo debug: log + record every time the player receives a NEW Attack move.
+                // attackInstanceId bumps exactly once per EnterState-with-a-move-id call (fresh
+                // SelectMove-from-Idle or a same-state cancel alike - see FighterState.h's own
+                // comment) and, unlike framesInMove, stays put across a hitstop freeze - so
+                // comparing it against the last value logged fires exactly once per entry even
+                // when the fighter is frozen at framesInMove==1 for a couple of ticks right after
+                // (the previous hit's own reaction arriving one tick late, same lag every other
+                // reader of lastCollisionEvents already has). Telling a cancel apart from a fresh
+                // entry only needs whether the PREVIOUS tick was also "Attack" - a cancel never
+                // passes through Idle in between, a fresh entry always does.
+                const Game::FighterState& playerCombo = registry.get<Game::FighterState>(characterEntity);
+                if (playerCombo.currentState == "Attack" && playerCombo.attackInstanceId != comboLastLoggedInstanceId)
+                {
+                    comboLastLoggedInstanceId = playerCombo.attackInstanceId;
+                    const bool viaCancel = comboPrevState == "Attack";
+                    Foundation::Log::Write(
+                        Foundation::Log::Severity::Info, "Combo", "t%u %s %s", simClock.tickCount, viaCancel ? "cancel ->" : "enter",
+                        playerCombo.activeMoveId.c_str());
+                    comboHistory.push_back({ simClock.tickCount, viaCancel, playerCombo.activeMoveId });
+                    if (comboHistory.size() > 8)
+                    {
+                        comboHistory.erase(comboHistory.begin());
+                    }
+                }
+                comboPrevState = playerCombo.currentState;
             }
 
             // AI preset decision - see dummyAiPreset's own declaration for why this is a testing
@@ -926,6 +984,28 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
                 Game::FighterUpdateInput{
                     dummyInputCommand, dummyInputHistory, lastCollisionEvents, sharedStates, dummyDefinition, characterModel.clips,
                     characterModel, /*forceShowAllHitboxes*/ false });
+
+            // Undying dummy: once the KO drop has had time to actually read on screen (past its
+            // own settle window, plus a short hold so the pose is clearly visible, not skipped
+            // the instant health hits 0), snap straight back to full health and Idle - bypassing
+            // states.combat entirely, the same way the Reset button already does, since KO
+            // itself has no authored way out. Re-checked every tick while still KO'd rather than
+            // latched once, which is fine - reset is idempotent and this naturally stops firing
+            // the moment currentState leaves "KO". Verified via a scripted repeated-punch capture
+            // that this fires exactly once per knockout and resumes normal hit processing right
+            // after (health ticking back down from 100 on the next landed hit, not stuck).
+            if (dummyUndying)
+            {
+                Game::FighterState& dummyState = registry.get<Game::FighterState>(dummyEntity);
+                constexpr uint32_t kUndyingReviveHoldFrames = 30; // ~0.5s past the drop settling - a beat to read the KO, eyeball-tuned.
+                if (dummyState.currentState == "KO" &&
+                    dummyState.framesInState >= dummyDefinition.koDropEndFrame + kUndyingReviveHoldFrames)
+                {
+                    dummyState = Game::FighterState{};
+                    registry.replace<Game::Health>(
+                        dummyEntity, Game::Health{ dummyDefinition.stats.maxHealth, dummyDefinition.stats.maxHealth });
+                }
+            }
 
             // Fighter-vs-fighter body separation - keeps the two from walking through each
             // other. A simple 1D check (this is a 2D-camera game; only X is a real gameplay
@@ -1239,6 +1319,58 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
                     health.current, health.max, fighterTransform.position.x, fighterTransform.position.y);
             }
 
+            // Combo debug - reads the same mechanism FighterState.cpp's own cancel loop uses
+            // (a cancel target's own inputButton + its condition, evaluated against this same
+            // hitConfirmed/frame context) so "is a follow-up reachable right now" is read
+            // straight off the real state instead of inferred from replaying a hunch. Paired
+            // with the rolling transition history logged (Log category "Combo") right after
+            // this fighter's own UpdateFighterState call above.
+            ImGui::SeparatorText("Combo debug");
+            {
+                const Game::FighterState& comboState = registry.get<Game::FighterState>(characterEntity);
+                ImGui::Text(
+                    "Active move: %s  hitConfirmed: %s", comboState.activeMoveId.empty() ? "-" : comboState.activeMoveId.c_str(),
+                    comboState.moveHitConfirmed ? "true" : "false");
+                if (comboState.currentState == "Attack")
+                {
+                    if (const Game::MoveDefinition* activeMove = characterDefinition.moveTable.FindById(comboState.activeMoveId))
+                    {
+                        Game::CombatDsl::EvaluationContext cancelContext;
+                        cancelContext.getFlag = [&comboState](const std::string& name) -> bool
+                        {
+                            if (name == "hitConfirmed") return comboState.moveHitConfirmed;
+                            return false;
+                        };
+                        cancelContext.getNumber = [&comboState](const std::string& name) -> float
+                        {
+                            if (name == "frame") return static_cast<float>(comboState.framesInMove);
+                            return 0.0f;
+                        };
+                        for (const Game::CombatDsl::Cancel& cancel : activeMove->cancels)
+                        {
+                            const Game::MoveDefinition* target = characterDefinition.moveTable.FindById(cancel.toMoveId);
+                            const bool conditionMet = Game::CombatDsl::EvaluateCondition(*cancel.condition, cancelContext);
+                            ImGui::Text(
+                                "  -> %s (button %s): %s", cancel.toMoveId.c_str(), target ? target->inputButton.c_str() : "?",
+                                conditionMet ? "READY" : "waiting");
+                        }
+                    }
+                }
+                ImGui::Text("History (green = real cancel/hit-confirm link, white = fresh from neutral):");
+                for (const ComboHistoryEntry& entry : comboHistory)
+                {
+                    if (entry.viaCancel)
+                    {
+                        ImGui::TextColored(
+                            ImVec4(0.35f, 1.0f, 0.35f, 1.0f), "  t%u cancel -> %s", entry.tick, entry.moveId.c_str());
+                    }
+                    else
+                    {
+                        ImGui::Text("  t%u enter %s", entry.tick, entry.moveId.c_str());
+                    }
+                }
+            }
+
             // Dummy readout - same shape as the player's own above, since UpdateFighterState
             // drives it through the identical generic state machine. Directly useful for
             // confirming HitStun/block/KO/push-back actually landed on a real second entity.
@@ -1257,6 +1389,9 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
             ImGui::BeginDisabled(dummyAiPreset != 0);
             ImGui::Checkbox("Dummy blocks", &dummyBlocksHeld);
             ImGui::EndDisabled();
+            // See dummyUndying's own declaration - lets repeated combo testing keep going
+            // without a manual Reset after every knockout.
+            ImGui::Checkbox("Dummy undying (auto-revive after KO)", &dummyUndying);
 
             // Combined with "Collision debug draw" above (RenderTasks' own toggle) - this alone
             // draws nothing, it just widens WHEN a move's hitbox exists so there's something to
@@ -1552,7 +1687,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
             registry.replace<Game::Health>(
                 characterEntity, Game::Health{ characterDefinition.stats.maxHealth, characterDefinition.stats.maxHealth });
             // Same recovery for the dummy - it can reach KO/HitStun exactly like the player can.
-            registry.get<Engine::Transform>(dummyEntity) = Engine::Transform{ { 2.0f, 0.0f, 0.0f } };
+            registry.get<Engine::Transform>(dummyEntity) = Engine::Transform{ { Game::kDefaultFighterGapX, 0.0f, 0.0f } };
             registry.replace<Game::FighterState>(dummyEntity, Game::FighterState{});
             registry.replace<Game::Health>(
                 dummyEntity, Game::Health{ dummyDefinition.stats.maxHealth, dummyDefinition.stats.maxHealth });

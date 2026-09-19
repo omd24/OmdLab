@@ -5,10 +5,15 @@
 # state body - transitions are evaluated in file order, first true one wins, so getting hit or
 # dying always pre-empts everything else that tick.
 #
-# HitStun deliberately has no "wasHit" transition - a move's hitbox can stay active for several
-# ticks, and the generic executor only ever re-evaluates the CURRENT state's own transitions, so
-# leaving it out here is what stops a single hit from re-triggering HitStun on every tick it's
-# still overlapping.
+# HitStun DOES have a "wasHit" transition back into itself - a combo's second or third hit can
+# genuinely land while still playing out the FIRST hit's own reaction (this fighter's onHitStun
+# can easily outlast the gap between two fast combo hits), and without a way back in from HitStun
+# itself, that later hit's damage/reaction/hitstop was silently dropped - confirmed live as a
+# combo's middle or final hit reading as a delayed, indistinct pile-up. wasHit staying true for as
+# long as a single hitbox keeps physically overlapping (several ticks) is handled on the C++ side,
+# not by leaving the transition out here - FighterState.cpp's own wasHitThisTick detection now
+# gates on the ATTACKER's own current attack-instance id, not just raw hit presence, so the same
+# still-active hitbox re-triggers nothing while a genuinely new attack occurrence still can.
 #
 # KO has no transitions out - no round-reset flow exists yet.
 #
@@ -158,6 +163,15 @@ state HitStun
     transition KO
     {
         require healthDepleted
+    }
+
+    # Ahead of Idle's own exit below on purpose: a new hit landing on the exact same tick this
+    # fighter's OLD hitstun duration would otherwise have expired must win, refreshing HitStun with
+    # the new hit's own stun length - not quietly exit to Idle and drop the hit (confirmed live:
+    # this exact race is what silently ate a combo's middle hit before this transition existed).
+    transition HitStun
+    {
+        require wasHit
     }
 
     transition Idle

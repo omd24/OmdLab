@@ -79,6 +79,27 @@ namespace Game
         // untouched by EnterState so it keeps decaying independent of any state change that
         // follows.
         float pushbackRemaining = 0.0f;
+        // Bumped every time this fighter enters a new attack move (fresh from neutral OR via a
+        // cancel - see EnterState) - a cheap per-entity "which attack occurrence is this" id, so a
+        // defender can tell "a genuinely new hit just landed" apart from "the same still-active
+        // hitbox is still overlapping" without caring whether the two hits happen to share a
+        // moveId (re-throwing the same move later must still count as new; the SAME move instance
+        // staying active across several ticks must not). Snapshotted onto Engine::Hitbox (and from
+        // there onto Engine::HitEvent) the moment this fighter's own hitbox is (re)built each tick
+        // - a defender compares against THAT copy, not this live field, since by the time a
+        // (possibly still-frozen-in-its-own-hitstop) defender gets around to reacting to an older
+        // HitEvent, the attacker here may already have moved on to a newer instance; comparing
+        // live would then wrongly read every hit as new. See lastHitByAttacker's own comment for
+        // the other half of this.
+        uint32_t attackInstanceId = 0;
+        // The (attacker, attackInstanceId) pair this fighter last actually reacted to as a
+        // defender - lets HitStun be re-entered by a genuinely new hit (a combo's second/third hit
+        // landing while still playing out the first hit's reaction) while still ignoring the SAME
+        // hitbox's own continued overlap (including the hitstop-adjacent re-trigger case - see
+        // states.combat's own comment on why HitStun otherwise has no self transition). entt::null
+        // never matches a real attacker, so the very first hit always counts as new.
+        entt::entity lastHitByAttacker = entt::null;
+        uint32_t lastHitByAttackerInstanceId = 0;
     };
 
     struct Health

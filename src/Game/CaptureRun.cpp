@@ -236,12 +236,23 @@ namespace
             b.Wait(33);
             b.CaptureLast(110, "combo_ppk");
         }
+        else if (name == "combo_kkp") // kick, kick, punch -> kick_light -> kick_low -> hook_heavy
+        {
+            b.Wait(14);
+            b.Tap(FighterButton::Kick);          // kick_light enters
+            b.Wait(7);
+            b.TapRepeated(FighterButton::Kick, 7); // kick_low (kick_light's cancel, frame >= 12)
+            b.Wait(2);
+            b.TapRepeated(FighterButton::Punch, 6); // hook_heavy (kick_low's cancel, frame >= 10)
+            b.Wait(33);
+            b.CaptureLast(110, "combo_kkp");
+        }
         return b.out;
     }
 
-    const std::array<const char*, 15> kScripts = {
+    const std::array<const char*, 16> kScripts = {
         "idle", "punch", "kick", "punchkick", "walk", "walkhalf", "jump", "jumpfwd",
-        "hook_light", "hook_heavy", "kick_low", "kick_heavy", "combo_ppp", "combo_kkk", "combo_ppk"
+        "hook_light", "hook_heavy", "kick_low", "kick_heavy", "combo_ppp", "combo_kkk", "combo_ppk", "combo_kkp"
     };
 
     // Dummy world-X for a capture run, before its plan starts (see CaptureRun::DummyX's own

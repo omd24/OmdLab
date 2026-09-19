@@ -238,7 +238,7 @@ namespace
     // fallback path, since the mesh shift is unconditional.
     DirectX::XMFLOAT3 ResolveHitboxOffset(
         const Game::MoveHitboxDef& hitboxDef, float baseFacingCorrectionRadians, bool facingRight, float groundingOffsetY,
-        const Asset::Model& model, const std::vector<Asset::Clip>& availableClips, const std::string& clipName, uint32_t framesElapsed,
+        const Asset::Model& model, const std::vector<Asset::Clip>& availableClips, const std::string& clipName, float clipTimeSeconds,
         const Engine::Transform& entityTransform)
     {
         if (hitboxDef.resolvedJointIndex < 0)
@@ -262,11 +262,21 @@ namespace
             return offset;
         }
         const Asset::Clip& clip = availableClips[static_cast<size_t>(clipIndex)];
-        float t = static_cast<float>(framesElapsed) * Engine::FixedTimestepAccumulator::kFixedDeltaSeconds;
-        if (clip.durationSeconds > 0.0f)
-        {
-            t = fmodf(t, clip.durationSeconds);
-        }
+        // t comes in pre-computed by the caller via the SAME ComputeClipSeconds/WarpedClipSeconds
+        // call that drives what's actually on screen (animator.SetTime, just above this move's
+        // own hitbox attach/detach block) - this used to recompute its own plain linear
+        // framesElapsed*dt here instead, silently diverging from the visible pose the moment a
+        // move authored (or auto-detected) a timing curve. Confirmed as a real bug, not a
+        // theoretical one: kick_low's hitbox never connected at any tested range or offset, and a
+        // temporary per-tick log of the resolved world offset showed why - during its whole
+        // "active" window the old linear sample was landing at raw clip time ~0.12-0.25s of a
+        // ~1.2s clip, well before the crouch even finishes coiling, so the tracked foot position
+        // was still tucked behind the body (a negative, backward-pointing offset) rather than out
+        // front where the kick actually connects. A move whose warp curve happens to stay close
+        // to linear (or whose box is generous enough to still catch the real position by luck)
+        // could go on working despite the same divergence - this wasn't unique to kick_low, just
+        // the move that exposed it.
+        const float t = clip.durationSeconds > 0.0f ? std::clamp(clipTimeSeconds, 0.0f, clip.durationSeconds) : 0.0f;
 
         // rootTransform = Identity here on purpose, matching UpdateSkinnedPose's own call.
         // Deliberately NOT multiplying by characterDefinition.assetCorrection (the 100x mesh-
@@ -322,6 +332,11 @@ namespace
             {
                 state.stateDurationFrames = move->startupFrames + move->activeFrames + move->recoveryFrames;
             }
+            // A new attack occurrence, whether fresh from neutral or a same-state cancel - see
+            // FighterState.h's own comment on attackInstanceId for why a defender needs this
+            // (distinguishing "a new hit" from "the same hitbox still overlapping") rather than
+            // just comparing moveId, which a later unrelated attack could legitimately repeat.
+            ++state.attackInstanceId;
         }
     }
 
@@ -600,10 +615,22 @@ namespace
         {
             const int32_t moveIndex = characterDefinition.moveTable.IndexOf(activeMove->id);
             Engine::CollisionBox worldBox = activeHitbox->box;
+            // Same clip-time source the visible pose uses (ComputeClipSeconds, which applies the
+            // move's own warp curve when it has one) - see ResolveHitboxOffset's own comment on
+            // why re-deriving a plain linear time here instead used to silently track the wrong
+            // point in the clip. loop=true matches the Attack branch above (never KO/jumpArc).
+            float hitboxClipSeconds = 0.0f;
+            const int32_t hitboxClipIndex = FindClipIndex(availableClips, activeMove->animationClip);
+            if (hitboxClipIndex >= 0)
+            {
+                hitboxClipSeconds =
+                    ComputeClipSeconds(availableClips[static_cast<size_t>(hitboxClipIndex)], state.framesInState, true, activeMove);
+            }
             worldBox.offset = ResolveHitboxOffset(
                 *activeHitbox, characterDefinition.facingCorrectionRadians, state.facingRight, characterDefinition.groundingOffsetY,
-                characterModel, availableClips, activeMove->animationClip, state.framesInState, transform);
-            registry.emplace_or_replace<Engine::Hitbox>(entity, Engine::Hitbox{ worldBox, static_cast<uint32_t>(moveIndex) });
+                characterModel, availableClips, activeMove->animationClip, hitboxClipSeconds, transform);
+            registry.emplace_or_replace<Engine::Hitbox>(
+                entity, Engine::Hitbox{ worldBox, static_cast<uint32_t>(moveIndex), state.attackInstanceId });
         }
         else if (registry.all_of<Engine::Hitbox>(entity))
         {
@@ -717,6 +744,18 @@ namespace Game
         // tick is handled - simultaneous multi-attacker hits aren't modeled yet (nothing to model
         // them against before a second real fighter exists). Looked up via MoveSource (see
         // FighterState.h) rather than assuming the attacker is any particular kind of entity.
+        //
+        // Gated by attackInstanceId (see FighterState.h's own comment) rather than raw HitEvent
+        // presence: a combo's second/third hit can genuinely land while this fighter is still
+        // playing out the FIRST hit's HitStun (their own onHitStun can easily outlast the gap
+        // between two combo hits), and states.combat's HitStun self-transition (below) needs a
+        // real "is this actually a new hit" answer to safely re-enter HitStun without also
+        // reopening the door to the exact bug that self-transition would otherwise reintroduce -
+        // the SAME still-overlapping hitbox re-triggering every tick (worse right after hitstop
+        // ends, when the frozen attacker's box and this fighter's frozen hurtbox are still
+        // touching from the original hit). An attacker with no FighterState (a non-fighter hazard,
+        // say) has no instance id to compare - always treated as new, matching the old behavior
+        // for anything that isn't a real fighter.
         bool wasHitThisTick = false;
         const MoveDefinition* attackingMove = nullptr;
         // Only ever read once attackingMove is non-null (see the HitStun-entry push-back below),
@@ -727,8 +766,22 @@ namespace Game
         {
             if (hit.defender == entity)
             {
+                // Compared against the SNAPSHOT carried on the HitEvent itself (from the attacking
+                // Hitbox at the tick it was generated), not the attacker's own live FighterState -
+                // the attacker can already be one move further along by the time this defender
+                // (possibly only just now thawing out of its OWN hitstop from that same earlier
+                // hit) gets around to reacting, which raced and defeated an earlier version of
+                // this check that read the attacker's live instance id directly.
+                const bool isNewAttackInstance =
+                    hit.attacker != state.lastHitByAttacker || hit.attackInstanceId != state.lastHitByAttackerInstanceId;
+                if (!isNewAttackInstance)
+                {
+                    continue;
+                }
                 wasHitThisTick = true;
                 attackingEntity = hit.attacker;
+                state.lastHitByAttacker = hit.attacker;
+                state.lastHitByAttackerInstanceId = hit.attackInstanceId;
                 if (const MoveSource* attackerMoveSource = registry.try_get<MoveSource>(hit.attacker))
                 {
                     if (attackerMoveSource->moveTable != nullptr &&
@@ -832,9 +885,12 @@ namespace Game
                         // Damage/stun-duration/reaction-clip are applied here, as a one-time side
                         // effect of the transition into HitStun actually firing - never from raw
                         // HitEvent presence, which is what keeps a multi-tick-active hitbox from
-                        // re-triggering every tick it's still overlapping (states.combat itself
-                        // has no wasHit-driven transition inside HitStun's own body, so this
-                        // whole block simply can't run again until HitStun is exited).
+                        // re-triggering every tick it's still overlapping. That debounce is the
+                        // attackInstanceId check in the wasHit detection above, not the state
+                        // topology - states.combat's HitStun DOES have a wasHit transition back
+                        // into itself now (a combo's later hits need it), so this block runs again
+                        // exactly once per genuinely new hit, including one landing while still in
+                        // HitStun from the previous one.
                         const bool wasBlocking =
                             previousState != "Run" && input.thisTickInput.buttons[static_cast<size_t>(FighterButton::Block)].held;
                         EnterState(state, input.characterDefinition, "");
@@ -929,17 +985,46 @@ namespace Game
                     if (name == "frame") return static_cast<float>(state.framesInMove);
                     return 0.0f;
                 };
-                for (const CombatDsl::Cancel& cancel : activeMove->cancels)
+                // A cancel used to require the target's button on the EXACT tick its window
+                // opened - fine for mashing the same button into itself (many chances to land
+                // inside the window), but a one-shot press into a DIFFERENT button (the common
+                // shape of a combo's own ender, e.g. Punch, Punch, Kick) only gets the one try,
+                // and real play showed that one try landing early - before hitConfirmed/frame>=N
+                // is even true yet - was common enough to read as "the combo doesn't work".
+                // Buffered instead: scan backward from THIS tick, most-recent-first, and use the
+                // first tick with ANY of this move's cancel-target buttons pressed - same idea as
+                // a real fighting game's input buffer. Recency order matters, not just "pressed
+                // somewhere in the window": checking every cancel's own button against the WHOLE
+                // window independently (tried first) let a stale press survive its own move's
+                // TapRepeated overshoot and outrank a genuinely fresher different-button press
+                // just because its cancel happened to be listed first - confirmed by combo_ppk and
+                // combo_kkp resolving to each OTHER's ender. Scanning tick-by-tick and stopping at
+                // the first match fixes that: whichever button was actually pressed most recently
+                // wins, same as a player would expect. Bounded by framesInMove (ticks actually
+                // spent in THIS move), not a flat window, so a press can never be borrowed from
+                // before this move was even entered.
+                constexpr uint32_t kCancelInputBufferTicks = 8;
+                const uint32_t maxLookback = std::min<uint32_t>(kCancelInputBufferTicks - 1, state.framesInMove);
+                for (uint32_t ticksAgo = 0; ticksAgo <= maxLookback; ++ticksAgo)
                 {
-                    const MoveDefinition* target = input.characterDefinition.moveTable.FindById(cancel.toMoveId);
-                    const std::optional<FighterButton> targetButton =
-                        target != nullptr ? ParseFighterButtonName(target->inputButton) : std::nullopt;
-                    const bool targetButtonPressedThisTick =
-                        targetButton.has_value() &&
-                        input.thisTickInput.buttons[static_cast<size_t>(*targetButton)].pressedThisTick;
-                    if (targetButtonPressedThisTick && CombatDsl::EvaluateCondition(*cancel.condition, cancelContext))
+                    const Engine::InputCommand& buffered = input.inputHistory.Get(ticksAgo);
+                    bool cancelled = false;
+                    for (const CombatDsl::Cancel& cancel : activeMove->cancels)
                     {
-                        EnterState(state, input.characterDefinition, cancel.toMoveId);
+                        const MoveDefinition* target = input.characterDefinition.moveTable.FindById(cancel.toMoveId);
+                        const std::optional<FighterButton> targetButton =
+                            target != nullptr ? ParseFighterButtonName(target->inputButton) : std::nullopt;
+                        const bool targetButtonPressedThatTick =
+                            targetButton.has_value() && buffered.buttons[static_cast<size_t>(*targetButton)].pressedThisTick;
+                        if (targetButtonPressedThatTick && CombatDsl::EvaluateCondition(*cancel.condition, cancelContext))
+                        {
+                            EnterState(state, input.characterDefinition, cancel.toMoveId);
+                            cancelled = true;
+                            break;
+                        }
+                    }
+                    if (cancelled)
+                    {
                         break;
                     }
                 }

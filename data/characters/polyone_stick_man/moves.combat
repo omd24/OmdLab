@@ -10,6 +10,13 @@
 # deliberately wants a punishable whiff window. (punch clip 0.667s, kick_light clip 1.300s, for
 # reference - the state is far shorter than both now, by design.)
 #
+# A move with its own "cancel" block needs enough recovery to give that cancel's `frame >= N`
+# condition real room to be true before the state ends on its own - recovery 0 leaves only the
+# few ticks between N and startup+active, too narrow to hit reliably by hand (confirmed live:
+# a punch->hook_light->hook_heavy chain landed maybe half the time even mashing fast). 10 is the
+# proven-working width (kick_light's own recovery, whose follow-up chains reliably) - every
+# combo-linking move below uses it for that reason, not because 10 is otherwise special.
+#
 # A hitbox's optional "bone" field names a real joint (see the character's own skeleton - e.g.
 # "RightHand_014", "RightFoot_020") for the box to follow through the move's animated pose,
 # instead of sitting at a fixed offset from the character's root the whole active window (which
@@ -31,7 +38,12 @@ move punch
     inputButton Punch
     startup 8
     active 8
-    recovery 0
+    # Was 0 - left the cancel window below (frame >= 10) open for only ~4 runtime ticks
+    # (~67ms) before the state's own end, since nothing extended it past the strike. Raised to
+    # match kick_light's own recovery (already proven wide enough that its own follow-up chains
+    # reliably) rather than inventing a new number - widens the window to ~12 ticks (~200ms) and
+    # gives this move a real blend-out-to-idle tail instead of a hard cut when not canceled.
+    recovery 10
     damage 8
     onHitStun 14
     onBlockStun 8
@@ -87,7 +99,8 @@ move hook_light
     timingContact 0.51
     startup 8
     active 8
-    recovery 0
+    # Was 0 - same narrow-cancel-window issue as punch's own recovery, same fix.
+    recovery 10
     damage 9
     onHitStun 14
     onBlockStun 8
@@ -139,6 +152,16 @@ move hook_heavy
     onBlockStun 12
     guardHeight mid
     impact heavy
+    # As a combo ender this needs to read as the heaviest of the three punches, not just deal the
+    # most damage - "heavy" impact alone gives it the same hitStop/lunge as any other heavy hit
+    # (3 ticks / 0.42), and left at the default (unset) snap it snapped through windup->contact in
+    # just 3 ticks - too fast to register as a deliberate blow, confirmed by real play landing
+    # this exact hit and reading it as barely there. Explicit overrides push all three past the
+    # normal "heavy" ceiling: a slower, more visible snap (still faster than a Kick's own, this
+    # is a punch), and a longer freeze + harder forward drive on contact.
+    timingSnapFrames 7
+    hitStop 6
+    lunge 0.55
 
     hitbox
     {
@@ -204,7 +227,8 @@ move kick_low
     inputButton Kick
     startup 8
     active 8
-    recovery 0
+    # Was 0 - same narrow-cancel-window issue as punch's own recovery, same fix.
+    recovery 10
     damage 8
     onHitStun 14
     onBlockStun 8
@@ -218,8 +242,9 @@ move kick_low
         bone "RightFoot_020"
         # A crouching low kick keeps the foot lower and doesn't reach as far forward as a
         # standing kick - kick_light's own box (unchanged offsetY 0.2) never connected here even
-        # with the dummy in point-blank range. Lower + a touch more reach as a first guess;
-        # retune with the in-engine hitbox tuning tool + collision debug-draw once it's visible.
+        # point-blank. Lower + a touch more reach as a first guess, which turned out fine once a
+        # separate bug (the hitbox tracking the wrong instant of the clip - see FighterState.cpp's
+        # ResolveHitboxOffset) was fixed; no further retuning needed.
         offsetX 0.15
         offsetY 0.0
         offsetZ 0
@@ -230,7 +255,15 @@ move kick_low
         frameEnd 16
     }
 
+    # Same button (Kick) can cancel to either follow-up below, mirroring hook_light's own two
+    # cancels - the kick chain gets a kick ender (kick_heavy) and a punch-button ender
+    # (hook_heavy), same as the punch chain has a punch ender and a kick-button ender.
     cancel kick_heavy
+    {
+        require hitConfirmed
+        require frame >= 10
+    }
+    cancel hook_heavy
     {
         require hitConfirmed
         require frame >= 10
@@ -253,6 +286,12 @@ move kick_heavy
     impact heavy
     # Default snap let this one snap out abruptly - same fix kick_light needed.
     timingSnapFrames 10
+    # Ender emphasis, same reasoning as hook_heavy's own override just above: "heavy" impact's
+    # normal hitStop/lunge ceiling (3 ticks / 0.42) doesn't distinguish a combo finisher from any
+    # other heavy hit. Pushed past it so the last hit of a kick string plants harder and holds
+    # a beat longer than the two before it.
+    hitStop 6
+    lunge 0.55
 
     hitbox
     {
