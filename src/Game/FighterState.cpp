@@ -356,11 +356,19 @@ namespace
         // was hit at.
         transform.position.y = 0.0f;
 
+        // World-X velocity for this tick. World +X is only "forward" while facing right - any
+        // state whose meaning is "toward the opponent" (Run, an attack's lunge) or that picks a
+        // forward/backward clip (locomotion blend space) goes through forwardSign instead of
+        // assuming the sign of X, so a crossup that flips facing mid-fight flips those with it.
+        // A raw movement-axis press (Walk, jump takeoff) is a physical left/right and stays in
+        // world space.
         float moveUnitsPerSecond = 0.0f;
+        const float forwardSign = state.facingRight ? 1.0f : -1.0f;
         std::string clipName;
         // Idle/Walk/Run drive their animation from the locomotion blend space (keyed on signed
-        // movement speed), not a single clip. The other states set clipName and go through the
-        // single-clip path further down.
+        // movement speed measured along the facing direction - forward is positive), not a
+        // single clip. The other states set clipName and go through the single-clip path
+        // further down.
         bool locomotion = false;
         // Set by the Attack branch once a move's strike motion (startup + active) is spent: the
         // attack clip stops being sampled and the pose crossfades to idle across the remaining
@@ -381,12 +389,12 @@ namespace
         else if (state.currentState == "Run")
         {
             // Run is a committed forward dash, not conditional on the movement axis at all -
-            // holding just the Run button moves forward (matches this being a rushdown
-            // mechanic - see the design doc's "Run mechanic confirmed" note), and holding Back
-            // doesn't reverse it. A backward run was tried and dropped for now - the clip shows
-            // the character's back to the camera, which reads wrong for this side-view game.
+            // holding just the Run button moves toward whichever way the fighter is facing
+            // (the opponent's side, see FighterState::facingRight), and holding Back doesn't
+            // reverse it. A backward run was tried and dropped for now - the clip shows the
+            // character's back to the camera, which reads wrong for this side-view game.
             locomotion = true;
-            moveUnitsPerSecond = characterDefinition.stats.runSpeed;
+            moveUnitsPerSecond = forwardSign * characterDefinition.stats.runSpeed;
         }
         else if (state.currentState == "Jump")
         {
@@ -420,7 +428,6 @@ namespace
                             static_cast<float>(state.framesInMove) * Engine::FixedTimestepAccumulator::kFixedDeltaSeconds;
                         // v(t) = (2D/T)(1 - t/T): integrates to exactly D over [0, T], linear decel to 0 at T.
                         const float peakSpeed = windowSeconds > 0.0f ? (2.0f * activeMove->lungeDistance / windowSeconds) : 0.0f;
-                        const float forwardSign = state.facingRight ? 1.0f : -1.0f;
                         moveUnitsPerSecond = forwardSign * peakSpeed * (1.0f - elapsedSeconds / windowSeconds);
                     }
                 }
@@ -535,9 +542,14 @@ namespace
             // which also sanitises them. Easing the param (rather than snapping) is what keeps a
             // released stick from jumping walk-pose -> idle-pose in one tick, and keeps the
             // Walk<->Idle<->Run changes soft (they don't re-arm the crossfade - same source).
+            //
+            // The blend parameter is speed along the facing direction, not along world X: the
+            // model is rotated to face the opponent, so walking toward them must play
+            // walk_forward on either side of the stage (forwardSign is +-1, so this just
+            // re-signs the world velocity).
             const Engine::BlendSpace1D& space = characterDefinition.locomotionBlendSpace;
             animator.PlayBlendSpace(characterModel, availableClips, &space, BlendInSeconds(state.currentState));
-            DriveLocomotion(animator, space, availableClips, moveUnitsPerSecond);
+            DriveLocomotion(animator, space, availableClips, moveUnitsPerSecond * forwardSign);
         }
         else if (recoveryBlendOut)
         {
@@ -688,6 +700,20 @@ namespace Game
         characterDefinition.jumpFloatMask.assign(model.nodes.size(), 1.0f);
         Foundation::Log::Write(
             Foundation::Log::Severity::Info, "FighterState", "jump float mask: %zu node(s)", model.nodes.size());
+    }
+
+    bool ResolveIsLeftOf(bool wasLeftOf, float selfX, float otherX)
+    {
+        const float delta = otherX - selfX;
+        if (delta > kSideTieEpsilon)
+        {
+            return true;
+        }
+        if (delta < -kSideTieEpsilon)
+        {
+            return false;
+        }
+        return wasLeftOf;
     }
 
     std::optional<std::string> SelectMove(const CharacterDefinition& characterDefinition, const Engine::InputHistory& inputHistory)
@@ -853,23 +879,22 @@ namespace Game
                         EnterState(state, input.characterDefinition, "");
                         // Direction locked at takeoff from the movement axis's sign at this exact
                         // instant, no mid-air steering afterward - see FighterState.h's own
-                        // comment on jumpHorizontalSpeed.
+                        // comment on jumpHorizontalSpeed. The travel direction is a physical
+                        // world-X direction (it must not reverse if a crossup flips facing
+                        // mid-arc), but which clip plays depends on whether that direction is
+                        // toward or away from where the fighter faces at takeoff.
                         const float axis = input.thisTickInput.axis;
                         const float walkSpeed = input.characterDefinition.stats.walkSpeed;
-                        if (axis > kAxisDeadzone)
+                        const float takeoffDirection = axis > kAxisDeadzone ? 1.0f : (axis < -kAxisDeadzone ? -1.0f : 0.0f);
+                        const float takeoffForwardSign = state.facingRight ? 1.0f : -1.0f;
+                        state.jumpHorizontalSpeed = takeoffDirection * walkSpeed;
+                        if (takeoffDirection == 0.0f)
                         {
-                            state.jumpClip = "jump_forward";
-                            state.jumpHorizontalSpeed = walkSpeed;
-                        }
-                        else if (axis < -kAxisDeadzone)
-                        {
-                            state.jumpClip = "jump_backward";
-                            state.jumpHorizontalSpeed = -walkSpeed;
+                            state.jumpClip = "jump_in_place";
                         }
                         else
                         {
-                            state.jumpClip = "jump_in_place";
-                            state.jumpHorizontalSpeed = 0.0f;
+                            state.jumpClip = takeoffDirection * takeoffForwardSign > 0.0f ? "jump_forward" : "jump_backward";
                         }
                         // Total airtime from the closed-form parabola's own root - precomputed
                         // once here exactly the way Attack/HitStun precompute their own
@@ -921,8 +946,15 @@ namespace Game
                         {
                             // 1D gameplay axis (see GameConstants.h's own comment) - no vector
                             // normalize needed. Direction = which side of the attacker the
-                            // defender is currently standing on.
-                            const float pushDir = (defenderTransform.position.x >= attackerTransform->position.x) ? 1.0f : -1.0f;
+                            // defender is standing on, which for a fighter is simply the way it
+                            // faces (facing is always toward the opponent) - unlike comparing raw
+                            // X, that stays well-defined when the two are level. A non-fighter
+                            // attacker (the dev collision rig) has no facing, so it falls back to
+                            // comparing positions.
+                            const FighterState* attackerFacingState = registry.try_get<FighterState>(attackingEntity);
+                            const float pushDir = attackerFacingState != nullptr
+                                                      ? (attackerFacingState->facingRight ? 1.0f : -1.0f)
+                                                      : (defenderTransform.position.x >= attackerTransform->position.x ? 1.0f : -1.0f);
                             const float defenderPushDistance = wasBlocking ? kBlockPushbackDistance : kHitPushbackDistance;
                             state.pushbackRemaining = pushDir * defenderPushDistance;
                             if (FighterState* attackerState = registry.try_get<FighterState>(attackingEntity))

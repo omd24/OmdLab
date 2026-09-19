@@ -652,7 +652,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
         if (Game::CaptureRun::IsKnownScript(captureScriptName))
         {
             captureRun.emplace(captureScriptName);
-            registry.get<Engine::Transform>(characterEntity) = Engine::Transform{};
+            registry.get<Engine::Transform>(characterEntity) = Engine::Transform{ { captureRun->PlayerX(), 0.0f, 0.0f } };
             registry.replace<Game::FighterState>(characterEntity, Game::FighterState{});
             registry.replace<Game::Health>(
                 characterEntity, Game::Health{ characterDefinition.stats.maxHealth, characterDefinition.stats.maxHealth });
@@ -795,21 +795,19 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
             // facing the opponent regardless of which way either is currently walking/attacking,
             // so crossups/jumping past an opponent don't leave anyone facing backward.
             //
-            // Exception: while either fighter is right up against a wall, facing is left frozen
-            // at last tick's value - a jump-over there just bounces off the wall back to the
-            // same side, and re-deriving facing each tick as the separation push jitters the two
-            // past each other produces a rapid unnatural face-switch flicker. See
-            // kCornerFacingLockMargin.
+            // One side decision per tick, for the pair: the player's facing is the persistent
+            // "am I the left one", updated only when the two are clearly ordered (see
+            // ResolveIsLeftOf - level fighters, e.g. after a jump-over clamped at a wall, keep
+            // their sides), and the dummy is simply its opposite. Deriving both from the same bool
+            // is what makes "both facing the same way" or "facing away" unrepresentable, with no
+            // special case near the walls.
             {
                 const float playerX = registry.get<Engine::Transform>(characterEntity).position.x;
                 const float dummyX = registry.get<Engine::Transform>(dummyEntity).position.x;
-                const float cornerEdge = Game::kStageMovementHalfWidth - Game::kCornerFacingLockMargin;
-                const bool nearCorner = std::fabs(playerX) >= cornerEdge || std::fabs(dummyX) >= cornerEdge;
-                if (!nearCorner)
-                {
-                    registry.get<Game::FighterState>(characterEntity).facingRight = playerX <= dummyX;
-                    registry.get<Game::FighterState>(dummyEntity).facingRight = dummyX <= playerX;
-                }
+                Game::FighterState& playerFacingState = registry.get<Game::FighterState>(characterEntity);
+                const bool playerOnLeft = Game::ResolveIsLeftOf(playerFacingState.facingRight, playerX, dummyX);
+                playerFacingState.facingRight = playerOnLeft;
+                registry.get<Game::FighterState>(dummyEntity).facingRight = !playerOnLeft;
             }
 
             // See disableCharacterAnalogStickMovement's own declaration - unconditionally false
@@ -1027,20 +1025,38 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
                 // and separates them onto opposite sides, which is the intended result.
                 const bool eitherAirborne = playerTransform.position.y > 0.01f || dummyTransform.position.y > 0.01f;
                 const float minSeparation = Game::kFighterBodyHalfWidth * 2.0f;
-                const float delta = dummyTransform.position.x - playerTransform.position.x;
-                const float absDelta = delta >= 0.0f ? delta : -delta;
-                if (!eitherAirborne && absDelta < minSeparation)
+                // Sides come from the same rule facing uses (the player's stored facing is last
+                // tick's "am I the left one"), not from the raw sign of the X difference - two
+                // fighters at exactly the same X (a jump-over clamped at a wall) would otherwise
+                // resolve to whichever side the tie-break happened to pick, not the side they were
+                // actually on. Pushing along the side ordering also means the push can never carry
+                // one fighter past the other, so it cannot flip facing itself.
+                const bool playerOnLeft = Game::ResolveIsLeftOf(
+                    registry.get<Game::FighterState>(characterEntity).facingRight, playerTransform.position.x,
+                    dummyTransform.position.x);
+                Engine::Transform& leftTransform = playerOnLeft ? playerTransform : dummyTransform;
+                Engine::Transform& rightTransform = playerOnLeft ? dummyTransform : playerTransform;
+                const float overlap = minSeparation - (rightTransform.position.x - leftTransform.position.x);
+                if (!eitherAirborne && overlap > 0.0f)
                 {
-                    const float pushEach = (minSeparation - absDelta) * 0.5f;
-                    const float pushDir = delta >= 0.0f ? 1.0f : -1.0f; // Dummy is at/after player's X.
-                    dummyTransform.position.x += pushDir * pushEach;
-                    playerTransform.position.x -= pushDir * pushEach;
-                    // Re-clamp - pushing apart could in principle shove one past the wall if both
-                    // were already hugging it when the overlap was resolved.
-                    dummyTransform.position.x =
-                        std::clamp(dummyTransform.position.x, -Game::kStageMovementHalfWidth, Game::kStageMovementHalfWidth);
-                    playerTransform.position.x =
-                        std::clamp(playerTransform.position.x, -Game::kStageMovementHalfWidth, Game::kStageMovementHalfWidth);
+                    // Half the overlap each - but a fighter already hugging the wall can't
+                    // give ground, so whatever it could not absorb is handed to the other one,
+                    // rather than leaving a residual overlap that would take several more ticks
+                    // to work out (and keep the pair nearly level in the meantime).
+                    constexpr float kWall = Game::kStageMovementHalfWidth;
+                    leftTransform.position.x -= overlap * 0.5f;
+                    rightTransform.position.x += overlap * 0.5f;
+                    if (leftTransform.position.x < -kWall)
+                    {
+                        rightTransform.position.x += -kWall - leftTransform.position.x;
+                        leftTransform.position.x = -kWall;
+                    }
+                    if (rightTransform.position.x > kWall)
+                    {
+                        leftTransform.position.x -= rightTransform.position.x - kWall;
+                        rightTransform.position.x = kWall;
+                    }
+                    leftTransform.position.x = std::clamp(leftTransform.position.x, -kWall, kWall);
                 }
             }
 
@@ -1050,6 +1066,23 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
             // behind a dragged slider - intentional, an honest side effect of ticks/frames being
             // decoupled, not a bug).
             lastCollisionEvents = Engine::ResolveCollisions(registry);
+
+#ifdef OMD_DEV_TOOLS
+            if (captureRun)
+            {
+                // Where each fighter stands and which way it faces, once per tick - lets a
+                // capture that moves the fighters around (jump-overs, wall scripts) be checked
+                // for "always facing each other" and for a sensible landing without eyeballing
+                // frames.
+                const Engine::Transform& sidePlayer = registry.get<Engine::Transform>(characterEntity);
+                const Engine::Transform& sideDummy = registry.get<Engine::Transform>(dummyEntity);
+                Foundation::Log::Write(
+                    Foundation::Log::Severity::Info, "Side", "t%u player x=%.3f y=%.2f faceR=%d | dummy x=%.3f faceR=%d", simClock.tickCount,
+                    sidePlayer.position.x, sidePlayer.position.y,
+                    registry.get<Game::FighterState>(characterEntity).facingRight ? 1 : 0, sideDummy.position.x,
+                    registry.get<Game::FighterState>(dummyEntity).facingRight ? 1 : 0);
+            }
+#endif
         }
 
         // rootTransform/meshWorldTransform are both Identity here, not characterRootTransform -

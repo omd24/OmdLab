@@ -17,12 +17,12 @@ namespace Game
     constexpr float kStageWallMargin = 0.5f;
     constexpr float kStageMovementHalfWidth = kStageHalfWidth - kStageWallMargin;
 
-    // Facing (which way a fighter turns to look at the opponent) is frozen while either fighter
-    // is within this distance of a wall. Right at the corner a jump-over just bounces off the
-    // wall back to the same side, and re-deriving facing every tick from who-is-left-of-whom
-    // while the separation push nudges the two back and forth flickers the characters through
-    // rapid unnatural face-switches. Outside this zone facing snaps normally.
-    constexpr float kCornerFacingLockMargin = 0.5f;
+    // Which fighter is on the left is only re-decided when the two X positions differ by more
+    // than this; closer than that they are treated as level and keep the side they already had
+    // (see ResolveIsLeftOf). Two fighters can end up at exactly the same X - a jump-over at a
+    // wall clamps the jumper to the same X as the cornered opponent - and the sign of a zero
+    // difference must not pick a side.
+    constexpr float kSideTieEpsilon = 0.01f;
 
     // Global playback-rate multiplier for every fighter animation clip (FighterState.cpp's
     // SetClip) - the cheapest lever for "animations feel too slow/sluggish" that doesn't need

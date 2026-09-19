@@ -50,6 +50,10 @@ namespace Game
         // a hit - a combo chain would silently never advance past its first move.
         float DummyX() const { return m_dummyX; }
 
+        // World-X the player is placed at before this run starts - 0.0 unless a script needs a
+        // specific spot (e.g. the wall-adjacent jump-over scripts).
+        float PlayerX() const { return m_playerX; }
+
         // Non-empty for a script that tests one combo-only follow-up move in isolation (e.g.
         // "hook_light") - the caller should force the player straight into Attack playing this
         // move (Game::ForceEnterAttackMove) once, before running the plan, instead of relying
@@ -62,6 +66,7 @@ namespace Game
         std::vector<TickPlan> m_plan;
         Engine::InputCommand m_idle;
         float m_dummyX = 2.0f;
+        float m_playerX = 0.0f;
         std::string m_forcedMove;
     };
 }

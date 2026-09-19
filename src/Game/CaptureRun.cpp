@@ -104,6 +104,20 @@ namespace
                 out.push_back(f);
             }
         }
+
+        // Append `count` ticks holding `button` down (no movement axis), captured.
+        void CaptureHold(FighterButton button, unsigned count, const char* caption)
+        {
+            for (unsigned i = 0; i < count; ++i)
+            {
+                Game::CaptureRun::TickPlan f;
+                f.input.buttons[static_cast<size_t>(button)].held = true;
+                f.input.buttons[static_cast<size_t>(button)].pressedThisTick = (i == 0);
+                f.capture = true;
+                f.caption = caption;
+                out.push_back(f);
+            }
+        }
     };
 
     // total ~= lead-in + move length + settle, in ticks (60Hz). Kept a touch longer than the
@@ -152,6 +166,33 @@ namespace
         else if (name == "walkhalf")
         {
             b.CaptureAxis(0.5f, 48, "walkhalf"); // half stick -> blend(idle, walk_forward, ~0.5)
+        }
+        // Mirrored-stage locomotion: the dummy starts on the player's LEFT (see DummyXForScript),
+        // so the player faces -X and "toward the opponent" is world-left. Walk input is a
+        // physical stick direction (left = -1); Run has no direction input at all, it must carry
+        // the fighter toward the opponent on its own. Both should play the forward clips and
+        // close the distance, exactly as the unmirrored walk/run scripts do to the right.
+        else if (name == "walk_flip")
+        {
+            b.CaptureAxis(-1.0f, 40, "walk_flip");
+            b.CaptureAxis(0.0f, 30, "stop");
+        }
+        else if (name == "run_flip")
+        {
+            b.CaptureHold(FighterButton::Run, 40, "run_flip");
+            b.CaptureIdle(30, "stop");
+        }
+        // Jump-overs against a wall (see DummyXForScript/PlayerXForScript for the start
+        // positions): the jumper travels ~1.4 units, so it always reaches the wall. Each script
+        // ends with a settle window so the landing separation has fully resolved; the per-tick
+        // "[Side]" log lines carry the positions and facing of both fighters for checking the
+        // result.
+        else if (name == "corner_left_level" || name == "corner_left_pass" || name == "corner_right_level")
+        {
+            b.Wait(14);
+            b.TapAxis(FighterButton::Jump, name == "corner_right_level" ? 1.0f : -1.0f);
+            b.Wait(90);
+            b.CaptureLast(100, name.c_str());
         }
         else if (name == "jump")
         {
@@ -250,16 +291,57 @@ namespace
         return b.out;
     }
 
-    const std::array<const char*, 16> kScripts = {
-        "idle", "punch", "kick", "punchkick", "walk", "walkhalf", "jump", "jumpfwd",
+    const std::array<const char*, 21> kScripts = {
+        "idle", "punch", "kick", "punchkick", "walk", "walkhalf", "walk_flip", "run_flip", "jump", "jumpfwd",
+        "corner_left_level", "corner_left_pass", "corner_right_level",
         "hook_light", "hook_heavy", "kick_low", "kick_heavy", "combo_ppp", "combo_kkk", "combo_ppk", "combo_kkp"
     };
 
     // Dummy world-X for a capture run, before its plan starts (see CaptureRun::DummyX's own
-    // comment on why combo scripts need a different one).
+    // comment on why combo scripts need a different one). The *_flip scripts put it on the
+    // player's left instead, so the player starts out facing -X.
     float DummyXForScript(const std::string& name)
     {
+        if (name.size() > 5 && name.compare(name.size() - 5, 5, "_flip") == 0)
+        {
+            return -2.0f;
+        }
+        // Wall scripts: the dummy stands in the corner (the stage's movement limit is 5.5), or
+        // half a unit short of it for the jump that is meant to clear the dummy and land on the
+        // wall side.
+        if (name == "corner_left_level")
+        {
+            return -5.5f;
+        }
+        if (name == "corner_left_pass")
+        {
+            return -5.0f;
+        }
+        if (name == "corner_right_level")
+        {
+            return 5.5f;
+        }
         return name.rfind("combo_", 0) == 0 ? 1.2f : 2.0f;
+    }
+
+    // Player world-X for a capture run, before its plan starts. 0 for everything except the wall
+    // scripts, which start the player 0.8 units in from the dummy - inside jump range of it, but
+    // outside body-separation range so nothing is nudged before the plan starts.
+    float PlayerXForScript(const std::string& name)
+    {
+        if (name == "corner_left_level")
+        {
+            return -4.7f;
+        }
+        if (name == "corner_left_pass")
+        {
+            return -4.2f;
+        }
+        if (name == "corner_right_level")
+        {
+            return 4.7f;
+        }
+        return 0.0f;
     }
 
     // Non-empty for a script that force-enters one combo-only follow-up move directly (see
@@ -301,7 +383,7 @@ namespace Game
 
     CaptureRun::CaptureRun(const std::string& scriptName)
         : m_name(scriptName), m_plan(BuildPlan(scriptName)), m_dummyX(DummyXForScript(scriptName)),
-          m_forcedMove(ForcedMoveForScript(scriptName))
+          m_playerX(PlayerXForScript(scriptName)), m_forcedMove(ForcedMoveForScript(scriptName))
     {
         Engine::FrameCapture::BeginSession(scriptName);
         Foundation::Log::Write(Severity::Info, "CaptureRun", "script '%s': %zu ticks planned", scriptName.c_str(), m_plan.size());

@@ -50,10 +50,12 @@ namespace Game
         // movement axis's sign) at the moment Jump is entered and held fixed for the arc's
         // whole duration - no mid-air steering.
         std::string jumpClip;
-        // Horizontal speed (units/second, signed - same "forward" convention as InputCommand::
-        // axis) locked in at the moment Jump is entered and reapplied every tick for the rest of
-        // the arc, rather than read live from input the way Walk/Run compute their own
-        // moveUnitsPerSecond - see jumpClip's own comment for why.
+        // Horizontal speed (units/second, signed world X - positive is stage-right, the same sign
+        // as InputCommand::axis) locked in at the moment Jump is entered and reapplied every tick
+        // for the rest of the arc, rather than read live from input the way Walk computes its
+        // own moveUnitsPerSecond - see jumpClip's own comment for why. Deliberately world-space
+        // rather than facing-relative: a crossup flips facingRight mid-arc, and the jump must
+        // keep travelling the same physical way instead of reversing with it.
         float jumpHorizontalSpeed = 0.0f;
         // Snap (not smoothly interpolated) visual facing - true faces the character's default
         // orientation (CharacterDefinition::facingCorrectionRadians as authored), false adds a
@@ -117,6 +119,15 @@ namespace Game
     {
         const MoveTable* moveTable = nullptr;
     };
+
+    // Whether a fighter at selfX stands on the left of a fighter at otherX. wasLeftOf is the side
+    // it had before: only a clear ordering (more than kSideTieEpsilon apart) changes the answer,
+    // so two fighters level with each other - exactly the case after a jump-over clamped at a
+    // wall - keep their previous sides instead of resolving on the sign of noise. Facing (a
+    // fighter looks toward the opponent, so the left one faces right) and body separation both
+    // read sides through this, which is what keeps the two from ever disagreeing about who is
+    // where.
+    bool ResolveIsLeftOf(bool wasLeftOf, float selfX, float otherX);
 
     // Pure function: does this tick's input select a new move? Checks each MoveDefinition's
     // inputButton field against the latest InputCommand's pressed-this-tick edge, in table
