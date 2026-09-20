@@ -57,6 +57,19 @@ namespace Game
         // rather than facing-relative: a crossup flips facingRight mid-arc, and the jump must
         // keep travelling the same physical way instead of reversing with it.
         float jumpHorizontalSpeed = 0.0f;
+        // The jump's airborne arc, tracked on the fighter rather than on the Jump state so an aerial
+        // move (an Attack entered from Jump) can keep travelling the same arc while it plays and hand
+        // it back to Jump afterwards without restarting it. airFrames counts ticks since takeoff and
+        // airTotalFrames is the arc's whole length (from the closed-form parabola's own root); 0
+        // means no arc is in progress. Set at takeoff, cleared by every transition into a state
+        // other than Jump/Attack (a hit mid-air ends the arc on the spot), and ticked once per
+        // simulated tick while airborne - so a hitstop freeze holds the arc too.
+        uint32_t airFrames = 0;
+        uint32_t airTotalFrames = 0;
+        // Set once an aerial move has been performed this jump, cleared at the next takeoff - one
+        // aerial move per jump, the usual fighting-game limit.
+        bool airAttackUsed = false;
+        bool IsAirborne() const { return airFrames < airTotalFrames; }
         // Snap (not smoothly interpolated) visual facing - true faces the character's default
         // orientation (CharacterDefinition::facingCorrectionRadians as authored), false adds a
         // 180-degree flip on top of it. Set once per tick from outside UpdateFighterState (see
@@ -132,8 +145,11 @@ namespace Game
     // Pure function: does this tick's input select a new move? Checks each MoveDefinition's
     // inputButton field against the latest InputCommand's pressed-this-tick edge, in table
     // order (first match wins, same tie-break rule used for state transitions) - no motion-input
-    // sequences yet, just single-button triggers (see MoveTable.h).
-    std::optional<std::string> SelectMove(const CharacterDefinition& characterDefinition, const Engine::InputHistory& inputHistory);
+    // sequences yet, just single-button triggers (see MoveTable.h). Only moves whose stance
+    // matches the fighter's are considered: a grounded fighter selects Ground moves, an airborne
+    // one Air moves, so the same button means a different move in each.
+    std::optional<std::string> SelectMove(
+        const CharacterDefinition& characterDefinition, const Engine::InputHistory& inputHistory, bool airborne = false);
 
     // Test/tooling hook: forces this entity directly into "Attack" playing `moveId`, bypassing
     // SelectMove and cancels entirely. Needed for a combo-only follow-up move (one whose input

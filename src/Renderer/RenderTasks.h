@@ -95,7 +95,17 @@ namespace Renderer
         // optional dev-only test scene - the same section as "does the background compute
         // pass run" conceptually, not real shipped content).
         //
-        // Both let a non-Renderer caller add debug UI for decisions only it can make -
+        // extraWindowsUI: optional caller-supplied ImGui content for any further windows beyond
+        // "Renderer Debug" itself - unlike the two above, this one owns its own Begin()/End()
+        // calls entirely (RenderTasks never names or sizes these windows). Exists so a caller
+        // with enough debug UI to make one window unwieldy to scroll (Game's own fighter/combo
+        // readouts and animation-editing tools, say) can split it into several without
+        // RenderTasks needing to know how many windows that is or what any of them are called -
+        // same "caller supplies content, this file supplies none of its meaning" contract as the
+        // two above, just not nested inside "Renderer Debug". Invoked only where the two above
+        // are (OMD_DEV_TOOLS, showDebugUI) so all of a caller's debug windows show/hide together.
+        //
+        // All three let a non-Renderer caller add debug UI for decisions only it can make -
         // e.g. which of several loaded content categories to include in a pass's draw item
         // list - without RenderTasks (or any other Renderer file) needing to know what that
         // content is. No-op by default.
@@ -119,7 +129,8 @@ namespace Renderer
         // frame carries its own sim tick / state. Null or empty draws nothing.
         static bool DoFrame(
             const DirectX::XMFLOAT4X4& viewProjection, const std::function<void()>& primaryContentUI = {},
-            const std::function<void()>& debugSectionUI = {}, bool showDebugUI = true, const char* annotationText = nullptr)
+            const std::function<void()>& debugSectionUI = {}, const std::function<void()>& extraWindowsUI = {}, bool showDebugUI = true,
+            const char* annotationText = nullptr)
         {
 #ifdef OMD_DEV_TOOLS
             ImGuiHelper::NewFrame();
@@ -185,6 +196,11 @@ namespace Renderer
                     Foundation::Log::Write(Foundation::Log::Severity::Info, "Renderer", "Reset to defaults");
                 }
                 ImGui::End();
+
+                if (extraWindowsUI)
+                {
+                    extraWindowsUI();
+                }
             }
 #endif
 

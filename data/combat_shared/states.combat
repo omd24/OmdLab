@@ -17,10 +17,10 @@
 #
 # KO has no transitions out - no round-reset flow exists yet.
 #
-# Jump's total airtime (like Attack's move-authored duration, or HitStun's onHitStun/
-# onBlockStun) is precomputed once at entry from the closed-form projectile formula
-# 2*jumpSpeed/gravity (see FighterState.cpp) - animationFinished therefore needs zero new DSL
-# vocabulary to work for Jump, just a different stateDurationFrames formula at entry time.
+# Jump's total airtime is precomputed once at takeoff from the closed-form projectile formula
+# 2*jumpSpeed/gravity (see FighterState.cpp) and lives on the fighter rather than on the state, so
+# an aerial move (Attack entered from Jump) keeps the same arc going and Jump can pick it back up
+# afterwards. `airborne` is true while that arc is in progress; landing is it turning false.
 
 state Idle
 {
@@ -134,9 +134,17 @@ state Jump
         require healthDepleted
     }
 
+    # An attack button while airborne selects one of the aerial moves (stance air) - the same
+    # moveSelected flag as on the ground, since move selection itself already knows which stance
+    # the fighter is in. At most one per jump; after that the flag stays false until landing.
+    transition Attack
+    {
+        require moveSelected
+    }
+
     transition Idle
     {
-        require animationFinished
+        require not airborne
     }
 }
 
@@ -150,6 +158,21 @@ state Attack
     transition KO
     {
         require healthDepleted
+    }
+
+    # An aerial move that touches down before it has finished is cut off on the spot.
+    transition Idle
+    {
+        require airMoveLanded
+    }
+
+    # An aerial move that runs out of frames while still in the air goes back to falling along
+    # the same jump arc (not a fresh takeoff). A ground move is never airborne, so this can only
+    # fire for an aerial one.
+    transition Jump
+    {
+        require airborne
+        require animationFinished
     }
 
     transition Idle

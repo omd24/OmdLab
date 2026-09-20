@@ -147,6 +147,19 @@ namespace Game
                 if (name == "animationClip") move.animationClip = value.stringValue;
                 else if (name == "inputButton") move.inputButton = value.stringValue;
                 else if (name == "displayName") move.displayName = value.stringValue;
+                else if (name == "stance")
+                {
+                    if (value.stringValue == "air")
+                    {
+                        move.stance = MoveStance::Air;
+                    }
+                    else if (value.stringValue != "ground")
+                    {
+                        Foundation::Log::Write(
+                            Severity::Warning, "MoveTable", "move '%s': unknown stance '%s' - using ground", move.id.c_str(),
+                            value.stringValue.c_str());
+                    }
+                }
                 else if (name == "startup") move.startupFrames = static_cast<uint32_t>(value.numberValue);
                 else if (name == "active") move.activeFrames = static_cast<uint32_t>(value.numberValue);
                 else if (name == "recovery") move.recoveryFrames = static_cast<uint32_t>(value.numberValue);

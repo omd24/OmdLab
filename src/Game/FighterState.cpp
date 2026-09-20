@@ -331,6 +331,10 @@ namespace
             if (const Game::MoveDefinition* move = characterDefinition.moveTable.FindById(moveId))
             {
                 state.stateDurationFrames = move->startupFrames + move->activeFrames + move->recoveryFrames;
+                if (move->stance == Game::MoveStance::Air)
+                {
+                    state.airAttackUsed = true;
+                }
             }
             // A new attack occurrence, whether fresh from neutral or a same-state cancel - see
             // FighterState.h's own comment on attackInstanceId for why a defender needs this
@@ -343,17 +347,17 @@ namespace
     // All state-name-specific *meaning* lives here - the transition-walking loop in
     // UpdateFighterState and the DSL evaluator itself never see or care what "Walk"/"Attack"/
     // "HitStun"/"KO" mean (see FighterState.h's own comment for why that split is deliberate:
-    // the design doc explicitly sanctions the executor knowing state names, just not baking that
-    // knowledge into the generic parts).
+    // the executor is allowed to know state names, as long as that knowledge stays out of the
+    // generic parts).
     void ApplyStateEffects(entt::registry& registry, entt::entity entity, const Game::FighterState& state, const Game::CharacterDefinition& characterDefinition, const Engine::InputCommand& input, const std::vector<Asset::Clip>& availableClips, const Asset::Model& characterModel, bool forceShowAllHitboxes)
     {
         Engine::Transform& transform = registry.get<Engine::Transform>(entity);
         Engine::Animator& animator = registry.get<Engine::Animator>(entity);
 
-        // Grounded by default - only Jump's own branch below overrides this. No other state
-        // touches position.y, so without this reset, getting interrupted out of Jump early (hit
-        // mid-air -> HitStun) would otherwise leave the character stuck at whatever height it
-        // was hit at.
+        // Grounded by default - only a fighter with a jump arc in progress (see the airborne block
+        // below) overrides this. No other state touches position.y, so without this reset,
+        // getting interrupted out of Jump early (hit mid-air -> HitStun) would otherwise leave the
+        // character stuck at whatever height it was hit at.
         transform.position.y = 0.0f;
 
         // World-X velocity for this tick. World +X is only "forward" while facing right - any
@@ -374,6 +378,12 @@ namespace
         // attack clip stops being sampled and the pose crossfades to idle across the remaining
         // recovery - see the animator-drive section below.
         bool recoveryBlendOut = false;
+        // The aerial counterpart of the above: once an aerial move's strike is spent, the pose
+        // crossfades to the jump pose (at the arc's current phase) instead of to standing idle,
+        // over the remaining recovery. clipBlendSeconds is the crossfade length used when the
+        // single-clip path below switches clips - the per-state default unless this overrides it.
+        bool airRecoveryBlend = false;
+        float clipBlendSeconds = BlendInSeconds(state.currentState);
         const Game::MoveHitboxDef* activeHitbox = nullptr;
         const Game::MoveDefinition* activeMove = nullptr;
 
@@ -398,13 +408,9 @@ namespace
         }
         else if (state.currentState == "Jump")
         {
+            // The arc itself (height, horizontal travel) is applied below for every state that can
+            // carry one - Jump only picks the pose.
             clipName = state.jumpClip.empty() ? "jump_in_place" : state.jumpClip;
-            moveUnitsPerSecond = state.jumpHorizontalSpeed;
-            const float t = static_cast<float>(state.framesInState) * Engine::FixedTimestepAccumulator::kFixedDeltaSeconds;
-            // Closed-form parabola, evaluated directly from framesInState each tick (same
-            // pattern SetClip already uses) - the max(0, ...) clamp is the entire "don't go
-            // through the floor" mechanism, valid because the stage is flat.
-            transform.position.y = std::max(0.0f, characterDefinition.stats.jumpSpeed * t - 0.5f * kGravity * t * t);
         }
         else if (state.currentState == "Attack")
         {
@@ -416,7 +422,9 @@ namespace
                 // startup -> contact window and hits zero speed exactly at the strike, so the
                 // attacker plants rather than sliding through. Inert (moveUnitsPerSecond stays 0,
                 // the long-standing "moves are stationary" behavior) when lungeDistance == 0.
-                if (activeMove->lungeDistance != 0.0f)
+                // Never for an aerial move - it already carries the jump's own horizontal travel,
+                // and a lunge on top would double it.
+                if (activeMove->lungeDistance != 0.0f && activeMove->stance != Game::MoveStance::Air)
                 {
                     const uint32_t lungeWindowFrames =
                         activeMove->startupFrames + std::max<uint32_t>(1u, activeMove->timingSnapFrames);
@@ -462,10 +470,30 @@ namespace
                     // clip's own retract and the handoff snaps the limb back hard.
                     motionFrames = activeMove->startupFrames + std::max<uint32_t>(1u, activeMove->timingSnapFrames);
                 }
-                if (state.framesInMove >= motionFrames && state.stateDurationFrames > motionFrames &&
-                    !characterDefinition.locomotionBlendSpace.samples.empty())
+                if (state.framesInMove >= motionFrames && state.stateDurationFrames > motionFrames)
                 {
-                    recoveryBlendOut = true;
+                    if (activeMove->stance == Game::MoveStance::Air)
+                    {
+                        // Same hand-off at contact, but toward the jump pose: fading to standing
+                        // idle is wrong mid-air, and leaving the attack clip to play out its
+                        // post-strike retract instead crams all of it (a roundhouse's whole
+                        // torso swing back upright, say) into the few recovery ticks and then
+                        // cuts to the jump pose when the state ends. Once the Jump state resumes,
+                        // its own clip is already the one playing, so the fade simply completes.
+                        if (state.airTotalFrames > 0)
+                        {
+                            airRecoveryBlend = true;
+                            clipName = state.jumpClip.empty() ? "jump_in_place" : state.jumpClip;
+                            const float recoverySeconds =
+                                static_cast<float>(state.stateDurationFrames - state.framesInMove) *
+                                Engine::FixedTimestepAccumulator::kFixedDeltaSeconds;
+                            clipBlendSeconds = std::clamp(recoverySeconds, kMinRecoveryBlendSeconds, kMaxRecoveryBlendSeconds);
+                        }
+                    }
+                    else if (!characterDefinition.locomotionBlendSpace.samples.empty())
+                    {
+                        recoveryBlendOut = true;
+                    }
                 }
             }
         }
@@ -500,6 +528,21 @@ namespace
                 }
                 transform.position.y = characterDefinition.koDropOffsetY * progress;
             }
+        }
+
+        // A jump arc in progress - shared by Jump and an aerial Attack, which carry the same arc
+        // (state.airFrames is the only clock it reads, not framesInState, so an aerial move
+        // starting mid-arc neither restarts nor pauses it). Height is the closed-form parabola
+        // evaluated directly from the tick count, the max(0, ...) clamp being the entire "don't
+        // go through the floor" mechanism (valid because the stage is flat); horizontal travel is
+        // the direction latched at takeoff, added on top of whatever the state itself moves by
+        // (an aerial move sets no lunge of its own).
+        if (state.IsAirborne())
+        {
+            const float airSeconds = static_cast<float>(state.airFrames) * Engine::FixedTimestepAccumulator::kFixedDeltaSeconds;
+            transform.position.y = std::max(
+                0.0f, characterDefinition.stats.jumpSpeed * airSeconds - 0.5f * kGravity * airSeconds * airSeconds);
+            moveUnitsPerSecond += state.jumpHorizontalSpeed;
         }
 
         // A non-finite speed here would poison transform.position permanently (a NaN world
@@ -579,9 +622,13 @@ namespace
                 // fixed-rate playback either loops a short one mid-air or hangs on a long one.
                 // KO holds its last frame; everything else (Attack/HitStun) ends via
                 // animationFinished before its clip would wrap, so it loops harmlessly.
-                const bool jumpArc = state.currentState == "Jump" && state.stateDurationFrames > 0;
+                // The phase comes from the arc's own clock (airFrames), not framesInState, so a
+                // Jump resumed after an aerial move picks the clip up where the arc actually is.
+                // An aerial move's recovery blend (above) shows the jump pose too, so it takes the
+                // same arc-phase path.
+                const bool jumpArc = (state.currentState == "Jump" || airRecoveryBlend) && state.airTotalFrames > 0;
                 const bool loopClip = state.currentState != "KO" && !jumpArc;
-                animator.PlayClip(characterModel, availableClips, clipIndex, loopClip, BlendInSeconds(state.currentState));
+                animator.PlayClip(characterModel, availableClips, clipIndex, loopClip, clipBlendSeconds);
                 if (jumpArc && state.jumpClip == "jump_in_place")
                 {
                     // A neutral jump is a HELD pose plus one smooth sway - never the clip
@@ -593,7 +640,7 @@ namespace
                     // rise-and-settle of the whole body, no oscillation. Directional jumps use
                     // short clips and phase-map fine (below).
                     const float phase = std::clamp(
-                        static_cast<float>(state.framesInState) / static_cast<float>(state.stateDurationFrames), 0.0f, 1.0f);
+                        static_cast<float>(state.airFrames) / static_cast<float>(state.airTotalFrames), 0.0f, 1.0f);
                     constexpr float kHeldFraction = 0.10f;
                     constexpr float kSwayToFraction = 0.35f;
                     constexpr float kSwayAmount = 0.6f;
@@ -603,14 +650,20 @@ namespace
                         animator.overlayClipIndex = clipIndex; // same clip, a later held frame
                         animator.overlayClipSeconds = kSwayToFraction * clip.durationSeconds;
                         animator.overlayMask = &characterDefinition.jumpFloatMask;
-                        animator.overlayWeight = std::sin(phase * DirectX::XM_PI) * kSwayAmount;
+                        // Scaled by the crossfade's own progress: the overlay is applied on top of
+                        // the crossfaded result, and it is a pose of the jump clip, so at full
+                        // strength mid-arc it would drag a fighter fading INTO this pose (an
+                        // aerial move handing back to Jump) most of the way there on the first
+                        // tick, bypassing the fade. It comes in with the fade instead - and is
+                        // unchanged (weight 1) whenever no crossfade is running.
+                        animator.overlayWeight = std::sin(phase * DirectX::XM_PI) * kSwayAmount * animator.ActiveWeight();
                     }
                 }
                 else if (jumpArc)
                 {
                     // Phase-map the clip onto the arc: one playthrough over the airtime.
                     const float phase = std::clamp(
-                        static_cast<float>(state.framesInState) / static_cast<float>(state.stateDurationFrames), 0.0f, 1.0f);
+                        static_cast<float>(state.airFrames) / static_cast<float>(state.airTotalFrames), 0.0f, 1.0f);
                     animator.SetTime(phase * clip.durationSeconds);
                 }
                 else
@@ -716,11 +769,17 @@ namespace Game
         return wasLeftOf;
     }
 
-    std::optional<std::string> SelectMove(const CharacterDefinition& characterDefinition, const Engine::InputHistory& inputHistory)
+    std::optional<std::string> SelectMove(
+        const CharacterDefinition& characterDefinition, const Engine::InputHistory& inputHistory, bool airborne)
     {
         const Engine::InputCommand& latest = inputHistory.Latest();
+        const MoveStance wantedStance = airborne ? MoveStance::Air : MoveStance::Ground;
         for (const MoveDefinition& move : characterDefinition.moveTable.moves)
         {
+            if (move.stance != wantedStance)
+            {
+                continue;
+            }
             const std::optional<FighterButton> button = ParseFighterButtonName(move.inputButton);
             if (!button.has_value())
             {
@@ -820,7 +879,12 @@ namespace Game
             }
         }
 
-        const std::optional<std::string> selectedMoveId = SelectMove(input.characterDefinition, input.inputHistory);
+        // An airborne fighter selects from the aerial moves, and only until it has used its one
+        // aerial move this jump (see FighterState::airAttackUsed).
+        const bool airborneNow = state.IsAirborne();
+        const std::optional<std::string> selectedMoveId =
+            (airborneNow && state.airAttackUsed) ? std::nullopt
+                                                 : SelectMove(input.characterDefinition, input.inputHistory, airborneNow);
 
         const CombatDsl::StateDecl* currentStateDecl = nullptr;
         for (const CombatDsl::StateDecl& decl : input.sharedStates.states)
@@ -843,6 +907,15 @@ namespace Game
                 if (name == "runHeld") return input.thisTickInput.buttons[static_cast<size_t>(FighterButton::Run)].held;
                 if (name == "jumpPressed") return input.thisTickInput.buttons[static_cast<size_t>(FighterButton::Jump)].pressedThisTick;
                 if (name == "moveSelected") return selectedMoveId.has_value();
+                // A jump arc is still in progress (Jump, or an aerial move carrying it).
+                if (name == "airborne") return airborneNow;
+                // An aerial move whose arc has run out: it touched down mid-move, which ends it
+                // on the spot rather than letting it finish on the ground.
+                if (name == "airMoveLanded")
+                {
+                    const MoveDefinition* move = input.characterDefinition.moveTable.FindById(state.activeMoveId);
+                    return move != nullptr && move->stance == MoveStance::Air && !airborneNow;
+                }
                 if (name == "wasHit") return wasHitThisTick;
                 if (name == "healthDepleted") return registry.get<Health>(entity).current <= 0;
                 // True once a fixed-duration state (Attack: the active move's own frame count;
@@ -870,9 +943,23 @@ namespace Game
                     const std::string previousState = state.currentState;
                     state.currentState = transition.toState;
 
+                    // The jump arc only survives into Jump itself and an Attack (an aerial move
+                    // carrying it) - any other destination (landing, a hit mid-air, KO) ends it.
+                    if (state.currentState != "Jump" && state.currentState != "Attack")
+                    {
+                        state.airFrames = 0;
+                        state.airTotalFrames = 0;
+                    }
+
                     if (state.currentState == "Attack")
                     {
                         EnterState(state, input.characterDefinition, selectedMoveId.value_or(""));
+                    }
+                    else if (state.currentState == "Jump" && previousState == "Attack")
+                    {
+                        // An aerial move ran out of frames before landing: back to falling along
+                        // the SAME arc, not a new takeoff - direction, clip and clock all stay.
+                        EnterState(state, input.characterDefinition, "");
                     }
                     else if (state.currentState == "Jump")
                     {
@@ -897,13 +984,14 @@ namespace Game
                             state.jumpClip = takeoffDirection * takeoffForwardSign > 0.0f ? "jump_forward" : "jump_backward";
                         }
                         // Total airtime from the closed-form parabola's own root - precomputed
-                        // once here exactly the way Attack/HitStun precompute their own
-                        // stateDurationFrames, so landing falls out of the existing
-                        // animationFinished flag for free.
+                        // once here, so landing falls out of the airborne flag going false
+                        // rather than a separate landing check.
                         const float jumpSpeed = input.characterDefinition.stats.jumpSpeed;
                         const float totalAirtimeSeconds = kGravity > 0.0f ? (2.0f * jumpSpeed / kGravity) : 0.0f;
-                        state.stateDurationFrames = static_cast<uint32_t>(
+                        state.airFrames = 0;
+                        state.airTotalFrames = static_cast<uint32_t>(
                             std::round(totalAirtimeSeconds / Engine::FixedTimestepAccumulator::kFixedDeltaSeconds));
+                        state.airAttackUsed = false;
                     }
                     else if (state.currentState == "HitStun" && attackingMove != nullptr)
                     {
@@ -1092,6 +1180,10 @@ namespace Game
         if (state.currentState == "Attack")
         {
             ++state.framesInMove;
+        }
+        if (state.IsAirborne())
+        {
+            ++state.airFrames;
         }
     }
 

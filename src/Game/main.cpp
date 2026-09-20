@@ -586,6 +586,14 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
     bool f9WasDown = false;
     bool ctrlRWasDown = false;
 
+    // Whether the "Animation Editor" window (clip preview/scrub + hitbox tuning - see
+    // extraWindowsUI below) is open. Independent of captureDebugUIVisible: Ctrl+R hides every
+    // debug window at once for a clean screenshot, this just controls whether this one
+    // less-often-needed window is among them. Also flips false via its own titlebar close
+    // button (ImGui::Begin's p_open) - toggling this checkbox and closing the window are the
+    // same action either way.
+    bool showAnimationEditor = false;
+
     // Combo debug (dev tools only): a rolling log of the player's own move-to-move transitions
     // (fresh Attack entries and same-state cancels alike), for judging whether a combo chain
     // actually fired or a follow-up input just missed its window - see the detection site
@@ -838,7 +846,9 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
             // tick. UpdateFighterState below calls SelectMove again itself once move selection
             // actually becomes load-bearing (a later phase of this step) - harmless duplicate
             // work at this entity count, not worth threading the result through as a parameter.
-            if (const std::optional<std::string> selected = Game::SelectMove(characterDefinition, playerInputHistory); selected.has_value())
+            if (const std::optional<std::string> selected = Game::SelectMove(
+                    characterDefinition, playerInputHistory, registry.get<Game::FighterState>(characterEntity).IsAirborne());
+                selected.has_value())
             {
                 lastSelectedMove = selected;
             }
@@ -1076,11 +1086,14 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
                 // frames.
                 const Engine::Transform& sidePlayer = registry.get<Engine::Transform>(characterEntity);
                 const Engine::Transform& sideDummy = registry.get<Engine::Transform>(dummyEntity);
+                const Game::FighterState& sidePlayerState = registry.get<Game::FighterState>(characterEntity);
+                const Game::FighterState& sideDummyState = registry.get<Game::FighterState>(dummyEntity);
                 Foundation::Log::Write(
-                    Foundation::Log::Severity::Info, "Side", "t%u player x=%.3f y=%.2f faceR=%d | dummy x=%.3f faceR=%d", simClock.tickCount,
-                    sidePlayer.position.x, sidePlayer.position.y,
-                    registry.get<Game::FighterState>(characterEntity).facingRight ? 1 : 0, sideDummy.position.x,
-                    registry.get<Game::FighterState>(dummyEntity).facingRight ? 1 : 0);
+                    Foundation::Log::Severity::Info, "Side",
+                    "t%u player x=%.3f y=%.2f faceR=%d %s %s | dummy x=%.3f faceR=%d %s hp=%d", simClock.tickCount, sidePlayer.position.x,
+                    sidePlayer.position.y, sidePlayerState.facingRight ? 1 : 0, sidePlayerState.currentState.c_str(),
+                    sidePlayerState.activeMoveId.c_str(), sideDummy.position.x, sideDummyState.facingRight ? 1 : 0,
+                    sideDummyState.currentState.c_str(), registry.get<Game::Health>(dummyEntity).current);
             }
 #endif
         }
@@ -1201,57 +1214,24 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
 
 #ifdef OMD_DEV_TOOLS
         // Character is real, shipped content - shown above RenderTasks' own "Debug" section,
-        // not inside it. Local test scene is dev-only content (see the "Bulk external test
-        // content" working convention), grouped with RenderTasks' own bring-up toggles
-        // instead - both land in the one "Renderer Debug" window regardless, since Renderer
-        // just invokes whichever of these two callbacks was given at whichever point in that
-        // window it doesn't itself know or care what they contain. Both lambdas (and the
-        // DoFrame call passing them) only exist under OMD_DEV_TOOLS - there's no non-ImGui UI
-        // system yet, so this whole window is dev tooling, not just its individual toggles.
+        // not inside it. Kept minimal on purpose: this window (RenderTasks' own "Renderer
+        // Debug") is meant to stay short enough never to need scrolling - everything else
+        // Game contributes (fighter/combo readouts, animation/hitbox editing tools) lives in
+        // extraWindowsUI's own windows below instead of growing this one.
         auto primaryContentUI = [&]()
         {
             if (ImGui::Checkbox("Character", &enableCharacter))
             {
                 rebuildDrawItems();
             }
-            if (!characterClipNames.empty())
+            // Opens the "Animation Editor" window (extraWindowsUI below) - see
+            // showAnimationEditor's own declaration for why this is independent of Ctrl+R.
+            // A button rather than a checkbox: this only ever opens the window - closing it is
+            // the window's own titlebar [x] (same bool either way), not a second way to do the
+            // same thing here.
+            if (ImGui::Button("Open animation editor"))
             {
-                // Off by default: UpdateFighterState (Idle/Walk/Run/Attack/.../KO) owns this
-                // entity's clip during real play and would otherwise overwrite any manual pick
-                // made below on the very next tick. Flip this on to preview one clip in
-                // isolation, same workflow as before the state machine existed.
-                ImGui::Checkbox("Manual clip override", &manualClipOverride);
-                Engine::Animator& characterAnimator = registry.get<Engine::Animator>(characterEntity);
-                int clipIndex = characterAnimator.clipIndex;
-                ImGui::BeginDisabled(!manualClipOverride);
-                if (ImGui::Combo("Clip", &clipIndex, characterClipNames.data(), static_cast<int>(characterClipNames.size())))
-                {
-                    characterAnimator.useBlendSpace = false;
-                    characterAnimator.clipIndex = clipIndex;
-                    characterAnimator.clipSeconds = 0.0f;
-                }
-                ImGui::Checkbox("Playing", &manualClipPlaying);
-                // Scrub + readout. Drag to a pose, read off its clip fraction - that fraction is
-                // exactly what a move's timingContact / timingWindup fields want. Dragging pauses
-                // playback so the pose holds still while it's read.
-                if (clipIndex >= 0 && clipIndex < static_cast<int>(characterModel.clips.size()))
-                {
-                    const float scrubDuration = characterModel.clips[static_cast<size_t>(clipIndex)].durationSeconds;
-                    if (scrubDuration > 0.0f)
-                    {
-                        float clipFraction = std::clamp(characterAnimator.clipSeconds / scrubDuration, 0.0f, 1.0f);
-                        if (ImGui::SliderFloat("Scrub (clip fraction)", &clipFraction, 0.0f, 1.0f, "%.3f"))
-                        {
-                            manualClipPlaying = false;
-                            characterAnimator.clipSeconds = clipFraction * scrubDuration;
-                        }
-                        ImGui::Text(
-                            "clip %.3f   frame %d / %d   %.3fs / %.3fs", clipFraction,
-                            static_cast<int>(std::round(clipFraction * scrubDuration * 60.0f)),
-                            static_cast<int>(std::round(scrubDuration * 60.0f)), clipFraction * scrubDuration, scrubDuration);
-                    }
-                }
-                ImGui::EndDisabled();
+                showAnimationEditor = true;
             }
         };
         auto debugSectionUI = [&]()
@@ -1318,11 +1298,23 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
             // just off by default (see enableCameraKeyboardControl's own declaration for why).
             ImGui::Checkbox("Camera keyboard control", &enableCameraKeyboardControl);
             ImGui::Checkbox("Disable character movement through controller analog stick", &disableCharacterAnalogStickMovement);
+        };
 
+        // Everything below used to also live in debugSectionUI above, all stacked into the one
+        // "Renderer Debug" window - scrolling through fighter/combo readouts to reach hitbox or
+        // character tuning (or the other way around) was the actual complaint that split it.
+        // Split by how often each is touched: fighterDebugUI is read/left-open during ordinary
+        // play (live state, AI, KO/collision-rig toggles); animationEditorUI is a dedicated,
+        // normally-closed tool session (previewing/scrubbing a clip, placing a hitbox) that
+        // shouldn't cost the other window space while unused. Both are plain content lambdas,
+        // same shape as primaryContentUI/debugSectionUI above - extraWindowsUI just below is
+        // what actually opens a window and calls them.
+        auto fighterDebugUI = [&]()
+        {
             // Visualizes the fixed-tick loop and the InputCommand it produces, since nothing
-            // else consumes either yet. One line per concern to stay compact in this
-            // already-tall debug window. Names here are Game's own (Engine's InputCommand has
-            // no idea these slots mean "Jump"/"Punch"/etc. - see Engine/Input.h).
+            // else consumes either yet. One line per concern to stay compact. Names here are
+            // Game's own (Engine's InputCommand has no idea these slots mean "Jump"/"Punch"/etc.
+            // - see Engine/Input.h).
             static const char* kButtonNames[] = { "Jump", "Crouch", "Punch", "Kick", "Block", "Run" };
             ImGui::SeparatorText("Input");
             ImGui::Text("Tick: %u  Axis: %.2f", simClock.tickCount, lastInputCommand.axis);
@@ -1428,13 +1420,137 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
 
             // Combined with "Collision debug draw" above (RenderTasks' own toggle) - this alone
             // draws nothing, it just widens WHEN a move's hitbox exists so there's something to
-            // see with that toggle on.
+            // see with that toggle on. Also read by the Hitbox tuning preview in the Animation
+            // Editor window, hence living here rather than there - it affects real gameplay
+            // hitboxes too, not just the preview.
             ImGui::Checkbox("Force show all hitboxes (whole Attack state, not just active frames)", &forceShowAllHitboxes);
+
+            // Per-asset placement tuning (character.combat's "correction" / "ko" blocks). Edits
+            // are live in memory on both fighters; "Save" writes them back via
+            // Game::SaveCharacterToFile, same memory-only-until-clicked contract as the hitbox
+            // tool. The Hurtbox is startup-baked from groundingOffsetY, so its debug-draw box
+            // won't follow the slider until a restart (mesh + bone-attached hitboxes do follow).
+            ImGui::SeparatorText("Character");
+            {
+                bool characterTuningChanged = false;
+                if (ImGui::SliderFloat("Grounding offset Y", &characterDefinition.groundingOffsetY, -0.6f, 0.6f, "%.3f"))
+                {
+                    dummyDefinition.groundingOffsetY = characterDefinition.groundingOffsetY;
+                    characterTuningChanged = true;
+                }
+
+                if (ImGui::SliderFloat("KO drop offset Y", &characterDefinition.koDropOffsetY, -1.5f, 0.0f, "%.3f"))
+                {
+                    dummyDefinition.koDropOffsetY = characterDefinition.koDropOffsetY;
+                    characterTuningChanged = true;
+                }
+                // Raw clip frames - rescaled into both definitions' speed-scaled runtime fields
+                // on any change (see koDropStartFrameRawUI's own declaration).
+                bool koFramesChanged = ImGui::SliderInt("KO drop start frame", &koDropStartFrameRawUI, 0, 90);
+                koFramesChanged |= ImGui::SliderInt("KO drop end frame", &koDropEndFrameRawUI, 0, 90);
+                if (koFramesChanged)
+                {
+                    const float invSpeed = 1.0f / Game::kCombatSpeedMultiplier;
+                    characterDefinition.koDropStartFrame =
+                        static_cast<uint32_t>(std::lround(static_cast<float>(koDropStartFrameRawUI) * invSpeed));
+                    characterDefinition.koDropEndFrame =
+                        static_cast<uint32_t>(std::lround(static_cast<float>(koDropEndFrameRawUI) * invSpeed));
+                    dummyDefinition.koDropStartFrame = characterDefinition.koDropStartFrame;
+                    dummyDefinition.koDropEndFrame = characterDefinition.koDropEndFrame;
+                    characterTuningChanged = true;
+                }
+                if (characterTuningChanged)
+                {
+                    characterTuningSaveMessage.clear();
+                }
+
+                // KO is otherwise awkward to trigger on demand - drop the player's HP to 0 and
+                // the shared "healthDepleted" transition takes them to KO next tick.
+                if (ImGui::Button("KO player now"))
+                {
+                    registry.get<Game::Health>(characterEntity).current = 0;
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Save to character.combat"))
+                {
+                    // Slider-bounded to [0, 90], so these are always non-negative.
+                    const bool saved = Game::SaveCharacterToFile(
+                        kCharacterFilePath, characterDefinition.groundingOffsetY, characterDefinition.koDropOffsetY,
+                        static_cast<uint32_t>(koDropStartFrameRawUI), static_cast<uint32_t>(koDropEndFrameRawUI));
+                    characterTuningSaveMessage = saved ? "Saved." : "Save failed - see logs/omdlab.log.";
+                }
+                if (!characterTuningSaveMessage.empty())
+                {
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("%s", characterTuningSaveMessage.c_str());
+                }
+            }
+
+            // Collision module test rig - see the entity setup above for why this one entity
+            // still exists (the dummy above now covers hitbox testing). Enable "Collision debug
+            // draw" above to see the box; drag it to make the test trigger overlap a hurtbox
+            // (turns red, Triggers count increases).
+            ImGui::SeparatorText("Collision (test rig)");
+            ImGui::SliderFloat("Test trigger X", &registry.get<Engine::Transform>(testTriggerEntity).position.x, -3.0f, 3.0f);
+            ImGui::Text("Hits: %zu  Triggers: %zu", lastCollisionEvents.hits.size(), lastCollisionEvents.triggers.size());
+        };
+
+        // Clip preview/scrub and hitbox placement - both work the same way (drive the character
+        // from an isolated preview rather than real input/state, watch it, drag a number, Save)
+        // and neither is needed for ordinary play, which is why they share a window kept closed
+        // by default (see showAnimationEditor's own declaration) instead of living in
+        // fighterDebugUI above. Future clip-timing work (trimming/reshaping which part of a long
+        // source clip a move actually plays - see DESIGN_LOG.md) belongs here too, alongside
+        // Manual clip override, once built.
+        auto animationEditorUI = [&]()
+        {
+            if (!characterClipNames.empty())
+            {
+                // Off by default: UpdateFighterState (Idle/Walk/Run/Attack/.../KO) owns this
+                // entity's clip during real play and would otherwise overwrite any manual pick
+                // made below on the very next tick. Flip this on to preview one clip in
+                // isolation, same workflow as before the state machine existed.
+                ImGui::SeparatorText("Manual clip override");
+                ImGui::Checkbox("Manual clip override", &manualClipOverride);
+                Engine::Animator& characterAnimator = registry.get<Engine::Animator>(characterEntity);
+                int clipIndex = characterAnimator.clipIndex;
+                ImGui::BeginDisabled(!manualClipOverride);
+                if (ImGui::Combo("Clip", &clipIndex, characterClipNames.data(), static_cast<int>(characterClipNames.size())))
+                {
+                    characterAnimator.useBlendSpace = false;
+                    characterAnimator.clipIndex = clipIndex;
+                    characterAnimator.clipSeconds = 0.0f;
+                }
+                ImGui::Checkbox("Playing", &manualClipPlaying);
+                // Scrub + readout. Drag to a pose, read off its clip fraction - that fraction is
+                // exactly what a move's timingContact / timingWindup fields want. Dragging pauses
+                // playback so the pose holds still while it's read.
+                if (clipIndex >= 0 && clipIndex < static_cast<int>(characterModel.clips.size()))
+                {
+                    const float scrubDuration = characterModel.clips[static_cast<size_t>(clipIndex)].durationSeconds;
+                    if (scrubDuration > 0.0f)
+                    {
+                        float clipFraction = std::clamp(characterAnimator.clipSeconds / scrubDuration, 0.0f, 1.0f);
+                        if (ImGui::SliderFloat("Scrub (clip fraction)", &clipFraction, 0.0f, 1.0f, "%.3f"))
+                        {
+                            manualClipPlaying = false;
+                            characterAnimator.clipSeconds = clipFraction * scrubDuration;
+                        }
+                        ImGui::Text(
+                            "clip %.3f   frame %d / %d   %.3fs / %.3fs", clipFraction,
+                            static_cast<int>(std::round(clipFraction * scrubDuration * 60.0f)),
+                            static_cast<int>(std::round(scrubDuration * 60.0f)), clipFraction * scrubDuration, scrubDuration);
+                    }
+                }
+                ImGui::EndDisabled();
+            }
 
             // Hitbox authoring/adjustment tooling - see hitboxTuningMoveIndex's own
             // declaration for how the tick loop uses this. "None" (index 0 here, -1 in
             // hitboxTuningMoveIndex) hands the character back to real gameplay. Enable
-            // "Collision debug draw" above to actually see the box while tuning.
+            // "Collision debug draw" (Renderer Debug window) to actually see the box while
+            // tuning, and "Force show all hitboxes" (Fighter Debug window) to watch it across
+            // the whole state instead of racing its own authored active window.
             ImGui::SeparatorText("Hitbox tuning");
             {
                 int hitboxTuningComboIndex = hitboxTuningMoveIndex + 1;
@@ -1520,75 +1636,40 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
                     }
                 }
             }
+        };
 
-            // Per-asset placement tuning (character.combat's "correction" / "ko" blocks). Edits
-            // are live in memory on both fighters; "Save" writes them back via
-            // Game::SaveCharacterToFile, same memory-only-until-clicked contract as the hitbox
-            // tool. The Hurtbox is startup-baked from groundingOffsetY, so its debug-draw box
-            // won't follow the slider until a restart (mesh + bone-attached hitboxes do follow).
-            ImGui::SeparatorText("Character");
+        // Opens whatever windows fighterDebugUI/animationEditorUI above actually need - see
+        // RenderTasks::DoFrame's own comment on extraWindowsUI for why this owns its own
+        // Begin()/End() calls instead of being nested inside "Renderer Debug" the way
+        // primaryContentUI/debugSectionUI are. Sizes/positions are first-run defaults only
+        // (ImGuiCond_FirstUseEver) - imgui.ini remembers whatever the user drags them to after
+        // that, same as every other ImGui window here.
+        auto extraWindowsUI = [&]()
+        {
+            // Height deliberately stays within the game's own fixed windowHeight (720, main.cpp)
+            // minus this window's y - ImGui doesn't clip a window's position to the app's own
+            // client area (no multi-viewport backend here), so a taller first-run request would
+            // silently render past the bottom of the screen instead of scrolling within itself.
+            // Content that still doesn't fit gets this window's own scrollbar, same as any
+            // other ImGui window - that's the graceful case, going off-screen is not.
+            ImGui::SetNextWindowPos(ImVec2(360.0f, 20.0f), ImGuiCond_FirstUseEver);
+            ImGui::SetNextWindowSize(ImVec2(460.0f, 680.0f), ImGuiCond_FirstUseEver);
+            ImGui::Begin("Fighter Debug");
+            fighterDebugUI();
+            ImGui::End();
+
+            // Closed by default and opened by the "Open animation editor" button in Renderer
+            // Debug - see showAnimationEditor's own declaration. The window's own titlebar
+            // close button also clears showAnimationEditor via this same p_open pointer, so
+            // either one closes it and the checkbox reflects it back correctly next frame.
+            if (showAnimationEditor)
             {
-                bool characterTuningChanged = false;
-                if (ImGui::SliderFloat("Grounding offset Y", &characterDefinition.groundingOffsetY, -0.6f, 0.6f, "%.3f"))
-                {
-                    dummyDefinition.groundingOffsetY = characterDefinition.groundingOffsetY;
-                    characterTuningChanged = true;
-                }
-
-                if (ImGui::SliderFloat("KO drop offset Y", &characterDefinition.koDropOffsetY, -1.5f, 0.0f, "%.3f"))
-                {
-                    dummyDefinition.koDropOffsetY = characterDefinition.koDropOffsetY;
-                    characterTuningChanged = true;
-                }
-                // Raw clip frames - rescaled into both definitions' speed-scaled runtime fields
-                // on any change (see koDropStartFrameRawUI's own declaration).
-                bool koFramesChanged = ImGui::SliderInt("KO drop start frame", &koDropStartFrameRawUI, 0, 90);
-                koFramesChanged |= ImGui::SliderInt("KO drop end frame", &koDropEndFrameRawUI, 0, 90);
-                if (koFramesChanged)
-                {
-                    const float invSpeed = 1.0f / Game::kCombatSpeedMultiplier;
-                    characterDefinition.koDropStartFrame =
-                        static_cast<uint32_t>(std::lround(static_cast<float>(koDropStartFrameRawUI) * invSpeed));
-                    characterDefinition.koDropEndFrame =
-                        static_cast<uint32_t>(std::lround(static_cast<float>(koDropEndFrameRawUI) * invSpeed));
-                    dummyDefinition.koDropStartFrame = characterDefinition.koDropStartFrame;
-                    dummyDefinition.koDropEndFrame = characterDefinition.koDropEndFrame;
-                    characterTuningChanged = true;
-                }
-                if (characterTuningChanged)
-                {
-                    characterTuningSaveMessage.clear();
-                }
-
-                // KO is otherwise awkward to trigger on demand - drop the player's HP to 0 and
-                // the shared "healthDepleted" transition takes them to KO next tick.
-                if (ImGui::Button("KO player now"))
-                {
-                    registry.get<Game::Health>(characterEntity).current = 0;
-                }
-                ImGui::SameLine();
-                if (ImGui::Button("Save to character.combat"))
-                {
-                    // Slider-bounded to [0, 90], so these are always non-negative.
-                    const bool saved = Game::SaveCharacterToFile(
-                        kCharacterFilePath, characterDefinition.groundingOffsetY, characterDefinition.koDropOffsetY,
-                        static_cast<uint32_t>(koDropStartFrameRawUI), static_cast<uint32_t>(koDropEndFrameRawUI));
-                    characterTuningSaveMessage = saved ? "Saved." : "Save failed - see logs/omdlab.log.";
-                }
-                if (!characterTuningSaveMessage.empty())
-                {
-                    ImGui::SameLine();
-                    ImGui::TextDisabled("%s", characterTuningSaveMessage.c_str());
-                }
+                ImGui::SetNextWindowPos(ImVec2(840.0f, 20.0f), ImGuiCond_FirstUseEver);
+                ImGui::SetNextWindowSize(ImVec2(420.0f, 520.0f), ImGuiCond_FirstUseEver);
+                ImGui::Begin("Animation Editor", &showAnimationEditor);
+                animationEditorUI();
+                ImGui::End();
             }
-
-            // Collision module test rig - see the entity setup above for why this one entity
-            // still exists (the dummy above now covers hitbox testing). Enable "Collision debug
-            // draw" above to see the box; drag it to make the test trigger overlap a hurtbox
-            // (turns red, Triggers count increases).
-            ImGui::SeparatorText("Collision (test rig)");
-            ImGui::SliderFloat("Test trigger X", &registry.get<Engine::Transform>(testTriggerEntity).position.x, -3.0f, 3.0f);
-            ImGui::Text("Hits: %zu  Triggers: %zu", lastCollisionEvents.hits.size(), lastCollisionEvents.triggers.size());
         };
 
         // Feed the capture annotation / motion.csv with this frame's player-fighter state, and
@@ -1691,7 +1772,8 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
         }
 
         if (Renderer::RenderTasks::DoFrame(
-                viewProjection, primaryContentUI, debugSectionUI, captureDebugUIVisible, Engine::FrameCapture::AnnotationText()))
+                viewProjection, primaryContentUI, debugSectionUI, extraWindowsUI, captureDebugUIVisible,
+                Engine::FrameCapture::AnnotationText()))
         {
             camera = Engine::Camera{};
             enableCameraFollow = true;

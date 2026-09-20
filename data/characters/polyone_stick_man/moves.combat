@@ -306,3 +306,70 @@ move kick_heavy
         frameEnd 20
     }
 }
+
+# Aerial moves - `stance air` makes a move selectable only while airborne (and a ground move
+# never while airborne), so Punch/Kick mid-jump resolve here instead of to the ground strings
+# above. There is no dedicated aerial animation: each reuses an existing ground clip and its
+# hitbox bone, with the same timing and frame data as the move it borrows from, so retuning the
+# shared clip tunes both. An aerial move has no lunge (the jump already carries the fighter
+# sideways), no cancels, and is cut off if the fighter lands before it finishes.
+
+move jump_punch
+{
+    # Borrows punch: same clip, striking hand and timing.
+    animationClip "punch"
+    inputButton Punch
+    stance air
+    startup 8
+    active 8
+    recovery 10
+    damage 8
+    onHitStun 14
+    onBlockStun 8
+    guardHeight overhead
+    impact medium
+
+    hitbox
+    {
+        bone "LeftHand_010"
+        offsetX 0.282
+        offsetY 0
+        offsetZ 0
+        halfX 0.2
+        halfY 0.15
+        halfZ 0.15
+        frameStart 8
+        frameEnd 16
+    }
+}
+
+move jump_kick
+{
+    # Borrows kick_heavy: same clip, striking foot and timing - minus its combo-ender hitStop/
+    # lunge emphasis, which is about finishing a string, not about a jump-in.
+    animationClip "kick_heavy"
+    inputButton Kick
+    stance air
+    startup 10
+    active 10
+    recovery 10
+    damage 14
+    onHitStun 18
+    onBlockStun 12
+    guardHeight overhead
+    impact heavy
+    timingSnapFrames 10
+
+    hitbox
+    {
+        bone "RightFoot_020"
+        offsetX 0.087
+        offsetY 0.2
+        offsetZ 0
+        halfX 0.264
+        halfY 0.221
+        halfZ 0.18
+        frameStart 10
+        frameEnd 20
+    }
+}

@@ -27,6 +27,16 @@ namespace Game
         Unblockable,
     };
 
+    // Where a move can be performed from. A Ground move is selected from a grounded state and an
+    // Air move only while the fighter is mid-jump - the same button resolves to a different move
+    // in each, so an aerial variant can reuse a ground move's clip and hitbox without ever being
+    // reachable from the floor (or the reverse).
+    enum class MoveStance : uint8_t
+    {
+        Ground,
+        Air,
+    };
+
     // Absolute (from move start) frame window a hitbox is active for - defaults to
     // [startupFrames, startupFrames + activeFrames) for the common single-hitbox move, but
     // authored per-hitbox so a future multi-hit move can override it.
@@ -56,6 +66,7 @@ namespace Game
         std::string displayName;
         std::string animationClip; // References an Asset::Clip by name.
         std::string inputButton;   // Matches a Game::FighterButton's name (see InputBindings.h).
+        MoveStance stance = MoveStance::Ground; // Authored as "stance ground|air".
         uint32_t startupFrames = 0;
         uint32_t activeFrames = 0;
         uint32_t recoveryFrames = 0;

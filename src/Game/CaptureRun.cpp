@@ -182,6 +182,40 @@ namespace
             b.CaptureHold(FighterButton::Run, 40, "run_flip");
             b.CaptureIdle(30, "stop");
         }
+        // Aerial attacks, named jumpatk_<n|f|b>_<p|k>: takeoff neutral / forward / backward, then
+        // Punch or Kick partway through the arc. The dummy stands 1.8 tall and the fighter's root
+        // is ~1.3 up at the apex with the fist/foot a good way above that, so a strike thrown
+        // early passes over its head at close range (measured: a neutral-jump kick pressed 10 or
+        // 16 ticks in whiffs, 22 connects). Both are pressed late enough that the strike lands
+        // on the way down, the way a real jump-in has to. The tail of the capture covers the
+        // aerial move finishing, falling, and landing.
+        else if (name.rfind("jumpatk_", 0) == 0)
+        {
+            const char direction = name[8];
+            const char attack = name[10];
+            const float axis = direction == 'f' ? 1.0f : (direction == 'b' ? -1.0f : 0.0f);
+            b.Wait(14);
+            b.TapAxis(FighterButton::Jump, axis);
+            // A trailing 'e' (jumpatk_n_pe) throws the strike early, ending the move while still
+            // in the air instead of being cut off by landing.
+            const bool early = name.size() > 11 && name[11] == 'e';
+            b.Wait(early ? 8 : (attack == 'k' ? 22 : 24));
+            b.Tap(attack == 'k' ? FighterButton::Kick : FighterButton::Punch);
+            b.Wait(70);
+            b.CaptureLast(100, name.c_str());
+        }
+        // Punch mashed through a whole neutral jump: only ONE aerial move may be performed per
+        // jump, so the log shows a single jump_punch during the arc and no second attack until
+        // the fighter has landed (where the mashing starts an ordinary ground punch).
+        else if (name == "jumpmash")
+        {
+            b.Wait(14);
+            b.Tap(FighterButton::Jump);
+            b.Wait(6);
+            b.TapRepeated(FighterButton::Punch, 30);
+            b.Wait(20);
+            b.CaptureLast(100, name.c_str());
+        }
         // Jump-overs against a wall (see DummyXForScript/PlayerXForScript for the start
         // positions): the jumper travels ~1.4 units, so it always reaches the wall. Each script
         // ends with a settle window so the landing separation has fully resolved; the per-tick
@@ -291,8 +325,9 @@ namespace
         return b.out;
     }
 
-    const std::array<const char*, 21> kScripts = {
+    const std::array<const char*, 31> kScripts = {
         "idle", "punch", "kick", "punchkick", "walk", "walkhalf", "walk_flip", "run_flip", "jump", "jumpfwd",
+        "jumpatk_n_p", "jumpatk_n_k", "jumpatk_f_p", "jumpatk_f_k", "jumpatk_b_p", "jumpatk_b_k", "jumpatk_n_pe", "jumpatk_n_ke", "jumpatk_f_ke", "jumpmash",
         "corner_left_level", "corner_left_pass", "corner_right_level",
         "hook_light", "hook_heavy", "kick_low", "kick_heavy", "combo_ppp", "combo_kkk", "combo_ppk", "combo_kkp"
     };
@@ -320,6 +355,18 @@ namespace
         if (name == "corner_right_level")
         {
             return 5.5f;
+        }
+        // Aerial attacks: the dummy stands where the jump's own travel puts a strike within
+        // reach - close for a neutral jump (about as close as body separation allows, since an
+        // aerial move has no lunge to add reach), further out for a forward one. A backward jump
+        // moves away from any reachable dummy, so it keeps the default (out of range) spacing.
+        if (name.rfind("jumpatk_n_", 0) == 0)
+        {
+            return 0.75f;
+        }
+        if (name.rfind("jumpatk_f_", 0) == 0)
+        {
+            return 1.5f;
         }
         return name.rfind("combo_", 0) == 0 ? 1.2f : 2.0f;
     }
