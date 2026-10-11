@@ -311,6 +311,13 @@ namespace
             b.Wait(33);
             b.CaptureLast(110, "combo_ppk");
         }
+        else if (name == "fireball") // Special -> projectile released at the end of startup, travels to the dummy
+        {
+            b.Wait(14);
+            b.Tap(FighterButton::Special);
+            b.Wait(120);
+            b.CaptureLast(130, "fireball");
+        }
         else if (name == "combo_kkp") // kick, kick, punch -> kick_light -> kick_low -> hook_heavy
         {
             b.Wait(14);
@@ -325,11 +332,11 @@ namespace
         return b.out;
     }
 
-    const std::array<const char*, 31> kScripts = {
+    const std::array<const char*, 32> kScripts = {
         "idle", "punch", "kick", "punchkick", "walk", "walkhalf", "walk_flip", "run_flip", "jump", "jumpfwd",
         "jumpatk_n_p", "jumpatk_n_k", "jumpatk_f_p", "jumpatk_f_k", "jumpatk_b_p", "jumpatk_b_k", "jumpatk_n_pe", "jumpatk_n_ke", "jumpatk_f_ke", "jumpmash",
         "corner_left_level", "corner_left_pass", "corner_right_level",
-        "hook_light", "hook_heavy", "kick_low", "kick_heavy", "combo_ppp", "combo_kkk", "combo_ppk", "combo_kkp"
+        "hook_light", "hook_heavy", "kick_low", "kick_heavy", "combo_ppp", "combo_kkk", "combo_ppk", "combo_kkp", "fireball"
     };
 
     // Dummy world-X for a capture run, before its plan starts (see CaptureRun::DummyX's own
@@ -367,6 +374,11 @@ namespace
         if (name.rfind("jumpatk_f_", 0) == 0)
         {
             return 1.5f;
+        }
+        // Fireball: far enough that the projectile has to travel to connect.
+        if (name == "fireball")
+        {
+            return 3.5f;
         }
         return name.rfind("combo_", 0) == 0 ? 1.2f : 2.0f;
     }

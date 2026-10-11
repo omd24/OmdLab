@@ -25,6 +25,7 @@
 #include "InputBindings.h"
 #include "LocalTestScene.h"
 #include "MoveTable.h"
+#include "Projectile.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
@@ -265,6 +266,9 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
             punishMove.timingCurveActive = realPunch->timingCurveActive;
             dummyDefinition.moveTable.moves.push_back(std::move(punishMove));
         }
+#if defined(OMD_PROTOTYPE)
+        Game::CopyFireballMoves(characterDefinition.moveTable, dummyDefinition.moveTable);
+#endif
     }
 
     // Resolved once, reused every frame below - the skinned mesh node's own skin (this asset
@@ -328,6 +332,9 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
     registry.emplace<Game::Health>(
         characterEntity, Game::Health{ characterDefinition.stats.maxHealth, characterDefinition.stats.maxHealth });
     registry.emplace<Game::MoveSource>(characterEntity, Game::MoveSource{ &characterDefinition.moveTable });
+#if defined(OMD_PROTOTYPE)
+    registry.emplace<Game::ProjectileCaster>(characterEntity);
+#endif
 
     // The dummy fighter - a real second entity (no AI, stands still, blocks only via a debug
     // checkbox below) to test the player's real moveset against a real Hurtbox, replacing the
@@ -354,9 +361,12 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
         Engine::Hurtbox{ { Engine::CollisionBox{ { 0.0f, 0.9f + dummyDefinition.groundingOffsetY, 0.0f }, { 0.35f, 0.9f, 0.25f } } } });
     registry.emplace<Game::FighterState>(dummyEntity);
     registry.emplace<Game::Health>(dummyEntity, Game::Health{ dummyDefinition.stats.maxHealth, dummyDefinition.stats.maxHealth });
-    // Never actually dereferenced (dummyDefinition.moveTable is always empty, so the dummy can
-    // never be a HitEvent's attacker) - kept only for uniform assembly with every other fighter.
+    // Resolves a HitEvent's move when the dummy is the attacker (its table holds only the
+    // scripted punish swing and the fireball entries).
     registry.emplace<Game::MoveSource>(dummyEntity, Game::MoveSource{ &dummyDefinition.moveTable });
+#if defined(OMD_PROTOTYPE)
+    registry.emplace<Game::ProjectileCaster>(dummyEntity);
+#endif
 
 #ifdef OMD_DEV_TOOLS
     // Collision module test rig - the hitbox half (a draggable ImGui-slider "attacker") is
@@ -390,6 +400,9 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
     // per-instance draw item in this project already follows.
     Renderer::StaticMeshDrawItem playerShadowDrawItem = Game::CreateFighterShadowDrawItem();
     Renderer::StaticMeshDrawItem dummyShadowDrawItem = Game::CreateFighterShadowDrawItem();
+#if defined(OMD_PROTOTYPE)
+    Game::ProjectileSystem projectileSystem = Game::CreateProjectileSystem(4);
+#endif
 
     // The character (GPU-skinned) and local test scene/ground plane (rigid) are different draw
     // item types feeding different passes - StaticMeshPass/SkinnedMeshPass never learn a
@@ -418,6 +431,9 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
             staticItems.push_back(playerShadowDrawItem);
         }
         staticItems.push_back(dummyShadowDrawItem);
+#if defined(OMD_PROTOTYPE)
+        staticItems.insert(staticItems.end(), projectileSystem.drawItems.begin(), projectileSystem.drawItems.end());
+#endif
 #ifdef OMD_DEV_TOOLS
         if (enableLocalTestScene)
         {
@@ -491,6 +507,8 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
     // would need reading the attacker's own FighterState, more than this testing tool needs).
     // 0 means "not currently winding up to punish."
     int dummyPunishCountdown = 0;
+    // Tick counter for the "Fireball" preset (3): the dummy casts every kDummyFireballPeriodTicks.
+    int dummyFireballTimer = 0;
     // Auto-revives the dummy a beat after it's KO'd (full health, back to Idle) instead of
     // leaving it lying there until the Reset button is pressed - states.combat's own KO state
     // has no transition out by design (no round-reset flow exists yet), so without this every
@@ -949,6 +967,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
             // reader of it in this loop already accepts.
             bool dummyBlockThisTick = false;
             bool dummyPunchThisTick = false;
+            bool dummySpecialThisTick = false;
             if (dummyAiPreset == 0) // Manual
             {
                 dummyBlockThisTick = dummyBlocksHeld;
@@ -956,6 +975,11 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
             else if (dummyAiPreset == 1) // Always block
             {
                 dummyBlockThisTick = true;
+            }
+            else if (dummyAiPreset == 3) // Fireball
+            {
+                constexpr int kDummyFireballPeriodTicks = 150;
+                dummySpecialThisTick = (++dummyFireballTimer % kDummyFireballPeriodTicks) == 0;
             }
             else // Block then punish
             {
@@ -997,6 +1021,12 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
                 punch.held = dummyPunchThisTick;
                 punch.pressedThisTick = dummyPunchThisTick && !punchWasHeld;
                 punch.releasedThisTick = !dummyPunchThisTick && punchWasHeld;
+
+                Engine::ButtonState& special = dummyInputCommand.buttons[static_cast<size_t>(Game::FighterButton::Special)];
+                const bool specialWasHeld = special.held;
+                special.held = dummySpecialThisTick;
+                special.pressedThisTick = dummySpecialThisTick && !specialWasHeld;
+                special.releasedThisTick = !dummySpecialThisTick && specialWasHeld;
             }
             dummyInputHistory.Push(dummyInputCommand);
             Game::UpdateFighterState(
@@ -1087,6 +1117,9 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
             // sliders below move them at render rate instead, so overlap color can lag a tick
             // behind a dragged slider - intentional, an honest side effect of ticks/frames being
             // decoupled, not a bug).
+#if defined(OMD_PROTOTYPE)
+            Game::UpdateProjectiles(registry, projectileSystem, lastCollisionEvents);
+#endif
             lastCollisionEvents = Engine::ResolveCollisions(registry);
 
 #ifdef OMD_DEV_TOOLS
@@ -1215,6 +1248,9 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
             Game::UpdateFighterShadowPosition(
                 dummyShadowDrawItem, dummyTransform.position.x, dummyTransform.position.y, dummyTransform.position.z);
         }
+#if defined(OMD_PROTOTYPE)
+        Game::UpdateProjectileRender(registry, projectileSystem);
+#endif
 
 #ifdef OMD_DEV_TOOLS
         // Rebuilt every render frame from the latest resolved tick's events (see above) - cheap
@@ -1421,7 +1457,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
                     dummyHealth.current, dummyHealth.max, dummyTransform.position.x, dummyTransform.position.y);
             }
             // See dummyAiPreset's own declaration - a testing convenience, not real AI.
-            static const char* kDummyAiPresetNames[] = { "Manual", "Always block", "Block then punish" };
+            static const char* kDummyAiPresetNames[] = { "Manual", "Always block", "Block then punish", "Fireball (every 2.5s)" };
             ImGui::Combo("Dummy AI", &dummyAiPreset, kDummyAiPresetNames, IM_ARRAYSIZE(kDummyAiPresetNames));
             ImGui::BeginDisabled(dummyAiPreset != 0);
             ImGui::Checkbox("Dummy blocks", &dummyBlocksHeld);
@@ -1904,6 +1940,9 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
             dummyBlocksHeld = false;
             dummyAiPreset = 0;
             dummyPunishCountdown = 0;
+#if defined(OMD_PROTOTYPE)
+            Game::ClearProjectiles(registry, projectileSystem);
+#endif
             // Also drop the last-resolved hit(s) - UpdateFighterState reacts to lastCollisionEvents
             // one tick late (see its own comment on why), so without this a hitbox that was still
             // overlapping the instant Reset was clicked would land one more hit right after the

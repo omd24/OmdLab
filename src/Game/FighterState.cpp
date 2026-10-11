@@ -11,6 +11,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <unordered_map>
+#include <vector>
 
 namespace
 {
@@ -126,6 +128,91 @@ namespace
         // Same epsilon-back-from-the-end guard SetClip's own non-looping path uses.
         constexpr float kEndEpsilon = 1.0f / 120.0f;
         return std::min(seconds, std::max(0.0f, clipDuration - kEndEpsilon));
+    }
+
+    // Where a reaction clip's flinch actually happens, measured from the clip itself rather than
+    // assumed: a retargeted hit reaction has a short lead-in, builds to its peak well into the
+    // clip, and only settles near its end - far longer than the hitstun a move authors. Played
+    // linearly for the stun's own length, only the rising part of the flinch is ever shown and
+    // the hand-off to idle cuts it at its strongest, which reads as a second, late reaction.
+    struct ReactionTiming
+    {
+        float startSeconds = 0.0f;  // First visible departure from the clip's first pose.
+        float peakSeconds = 0.0f;   // Strongest deviation from the first pose.
+        float settleSeconds = 0.0f; // Back near the first pose after the peak (clip end if never).
+    };
+
+    // Deviation of each sampled pose from the clip's first pose (summed rotation difference over
+    // all nodes), sampled once per tick; start/settle are where it crosses 10% of its peak.
+    ReactionTiming AnalyzeReactionClip(const Asset::Model& model, const Asset::Clip& clip)
+    {
+        ReactionTiming timing;
+        const float duration = clip.durationSeconds;
+        timing.settleSeconds = duration;
+        if (duration <= 0.0f)
+        {
+            return timing;
+        }
+        const Engine::Pose first = Engine::SampleClipPose(model, &clip, 0.0f);
+        std::vector<float> deviation;
+        for (float t = 0.0f; t <= duration; t += Engine::FixedTimestepAccumulator::kFixedDeltaSeconds)
+        {
+            const Engine::Pose pose = Engine::SampleClipPose(model, &clip, t);
+            float sum = 0.0f;
+            for (size_t i = 0; i < pose.nodes.size() && i < first.nodes.size(); ++i)
+            {
+                const DirectX::XMVECTOR a = DirectX::XMLoadFloat4(&first.nodes[i].rotation);
+                const DirectX::XMVECTOR b = DirectX::XMLoadFloat4(&pose.nodes[i].rotation);
+                sum += 1.0f - std::fabs(DirectX::XMVectorGetX(DirectX::XMVector4Dot(a, b)));
+            }
+            deviation.push_back(sum);
+        }
+        size_t peakIndex = 0;
+        for (size_t i = 0; i < deviation.size(); ++i)
+        {
+            if (deviation[i] > deviation[peakIndex])
+            {
+                peakIndex = i;
+            }
+        }
+        const float threshold = deviation[peakIndex] * 0.1f;
+        const float dt = Engine::FixedTimestepAccumulator::kFixedDeltaSeconds;
+        timing.peakSeconds = static_cast<float>(peakIndex) * dt;
+        for (size_t i = 0; i <= peakIndex; ++i)
+        {
+            if (deviation[i] >= threshold)
+            {
+                timing.startSeconds = static_cast<float>(i) * dt;
+                break;
+            }
+        }
+        for (size_t i = peakIndex; i < deviation.size(); ++i)
+        {
+            if (deviation[i] <= threshold)
+            {
+                timing.settleSeconds = static_cast<float>(i) * dt;
+                break;
+            }
+        }
+        return timing;
+    }
+
+    // Clip time for a reaction played across a stun of durationFrames: the flinch builds from
+    // its start to its peak in the first part of the stun (ease-out, so the hit reads at once),
+    // then eases back to neutral exactly as the stun ends - the hand-off to idle starts from a
+    // settled pose. The stun's own length (gameplay) is untouched; only the playback is fitted.
+    float ReactionClipSeconds(const ReactionTiming& timing, uint32_t framesElapsed, uint32_t durationFrames)
+    {
+        constexpr float kPeakAtFraction = 0.3f;
+        const float u = std::clamp(static_cast<float>(framesElapsed) / static_cast<float>(durationFrames), 0.0f, 1.0f);
+        if (u < kPeakAtFraction)
+        {
+            const float x = u / kPeakAtFraction;
+            const float eased = 1.0f - (1.0f - x) * (1.0f - x);
+            return timing.startSeconds + (timing.peakSeconds - timing.startSeconds) * eased;
+        }
+        const float x = (u - kPeakAtFraction) / (1.0f - kPeakAtFraction);
+        return timing.peakSeconds + (timing.settleSeconds - timing.peakSeconds) * SmoothStep01(x);
     }
 
     // Sets (not Advance()s) the clip and its playback time directly from a tick-derived frame
@@ -682,6 +769,18 @@ namespace
                     const float phase = std::clamp(
                         static_cast<float>(state.airFrames) / static_cast<float>(state.airTotalFrames), 0.0f, 1.0f);
                     animator.SetTime(phase * clip.durationSeconds);
+                }
+                else if (state.currentState == "HitStun" && state.stateDurationFrames > 0)
+                {
+                    // Fitted to the stun (see AnalyzeReactionClip) so the flinch peaks early and
+                    // has settled by the time the state ends. Analysed once per clip.
+                    static std::unordered_map<std::string, ReactionTiming> reactionTimings;
+                    auto found = reactionTimings.find(clip.name);
+                    if (found == reactionTimings.end())
+                    {
+                        found = reactionTimings.emplace(clip.name, AnalyzeReactionClip(characterModel, clip)).first;
+                    }
+                    animator.SetTime(ReactionClipSeconds(found->second, state.framesInState, state.stateDurationFrames));
                 }
                 else
                 {

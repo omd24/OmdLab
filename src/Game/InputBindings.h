@@ -19,6 +19,7 @@ namespace Game
         Kick,
         Block,
         Run,
+        Special,
         Count
     };
 

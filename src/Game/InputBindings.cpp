@@ -107,6 +107,10 @@ namespace Game
         run.primaryKey = 'L';
         run.gamepadInput = Engine::GamepadInput::LeftShoulder;
 
+        auto& special = bindings.buttons[static_cast<size_t>(FighterButton::Special)];
+        special.primaryKey = 'I';
+        special.gamepadInput = Engine::GamepadInput::ButtonY;
+
         bindings.axis.negativeKey = 'A';
         bindings.axis.positiveKey = 'D';
         bindings.axis.gamepadNegative = Engine::GamepadInput::DpadLeft;
@@ -124,6 +128,7 @@ namespace Game
         if (name == "Kick") return FighterButton::Kick;
         if (name == "Block") return FighterButton::Block;
         if (name == "Run") return FighterButton::Run;
+        if (name == "Special") return FighterButton::Special;
         return std::nullopt;
     }
 
@@ -139,7 +144,7 @@ namespace Game
         // Same-order names as the FighterButton enum, for readable log messages only - not used
         // for parsing (ParseFighterButtonName already owns that mapping).
         static constexpr std::array<const char*, static_cast<size_t>(FighterButton::Count)> kButtonNames = {
-            "Jump", "Crouch", "Punch", "Kick", "Block", "Run" };
+            "Jump", "Crouch", "Punch", "Kick", "Block", "Run", "Special" };
 
         // Built up in a local copy, only committed to outBindings once every expected row has
         // been found well-formed - see this function's own header comment for why.

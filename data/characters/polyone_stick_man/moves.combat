@@ -373,3 +373,31 @@ move jump_kick
         frameEnd 20
     }
 }
+
+# Fireball: a cast that launches a projectile. The move itself carries no hitbox - the
+# projectile entity is spawned when startup ends and carries the hit, resolved through the
+# "fireball_projectile" entry below. "active" is a pose-hold window (the hands stay thrust
+# forward while the projectile travels), not a hitbox window. Without an `impact` curve the clip
+# plays flat until startup + active, then blends out to idle.
+move fireball
+{
+    animationClip "special_fireball_light"
+    inputButton Special
+    startup 53
+    active 36
+    recovery 12
+    # Explicit: an unauthored lunge is a negative sentinel, not zero.
+    lunge 0
+    hitStop 0
+}
+
+# Data for the fireball projectile's hit - not selectable from input (no inputButton). Looked up
+# by id when the projectile is spawned.
+move fireball_projectile
+{
+    damage 12
+    onHitStun 22
+    onBlockStun 12
+    guardHeight mid
+    hitStop 4
+}

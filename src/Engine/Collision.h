@@ -40,6 +40,10 @@ namespace Engine
         // still frozen in hitstop when the attacker's hitbox was first created - gets around to
         // reacting to a HitEvent from a prior tick. See Game::FighterState's own comment.
         uint32_t attackInstanceId = 0;
+        // An entity this hitbox never hits, in addition to its own - for a volume that lives on
+        // its own entity but belongs to another one (a projectile must not hit whoever fired it).
+        // entt::null (the default) filters nothing.
+        entt::entity ignoreEntity = entt::null;
     };
 
     // Defense volume(s) - normally present on every entity that can be hit, for its whole

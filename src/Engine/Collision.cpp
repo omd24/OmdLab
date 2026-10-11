@@ -60,7 +60,7 @@ namespace Engine
 
             for (const entt::entity defender : hurtboxView)
             {
-                if (defender == attacker)
+                if (defender == attacker || defender == hitbox.ignoreEntity)
                 {
                     continue;
                 }

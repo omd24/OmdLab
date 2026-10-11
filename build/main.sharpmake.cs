@@ -85,6 +85,12 @@ public abstract class OmdLabProjectBase : Project
         // since no third "Shipping" config exists yet - the point is having one flag already
         // wired to flip off later, not a shipping pipeline now.
         conf.Defines.Add("OMD_DEV_TOOLS");
+
+        // Marks intentionally provisional functionality assembled quickly for a demonstration
+        // build: opponent behaviour, HUD, hit effects, sound, a special move and game-feel
+        // extras. Each guarded path is a known shortcut with a proper replacement (see the
+        // TODO(OM) at its site). Undefining this restores the previous behaviour.
+        conf.Defines.Add("OMD_PROTOTYPE");
     }
 }
 

@@ -14,6 +14,7 @@ Punch       J         ButtonX          -
 Kick        K         ButtonB          -
 Block       LShift    RightShoulder    -
 Run         L         LeftShoulder     -
+Special     I         ButtonY          -
 
 # One row for the movement axis: negative key, positive key, gamepad negative, gamepad positive,
 # gamepad analog axis (LeftStickX/LeftStickY/RightStickX/RightStickY - the analog stick always
