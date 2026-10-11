@@ -43,6 +43,10 @@ namespace Renderer
     //
     // TODO(OM): revisit once Engine has real scene data and more passes
     // exist to decide an order between.
+    //
+    // TODO(OM): explore real-time path-traced lighting (DXR): physically based
+    // direct and indirect light, accurate shadows and contact shadows,
+    // replacing the single hardcoded light and the planar projected shadows.
     struct RenderTasks
     {
         static void Init(HWND window, unsigned int width, unsigned int height)

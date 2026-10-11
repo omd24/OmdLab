@@ -16,6 +16,10 @@ namespace Game
     // lower it for more usable floor.
     constexpr float kStageWallMargin = 0.5f;
     constexpr float kStageMovementHalfWidth = kStageHalfWidth - kStageWallMargin;
+    // TODO(OM): treat the walls as real collision geometry. Movement is clamped on the root
+    // position only, so a fighter's limbs (and, mid-move, much of the body) can visibly pass
+    // through the boundary. Proper handling needs wall geometry plus clamping against the
+    // body's extents (hurtbox / skeleton bounds) instead of the root point.
 
     // Which fighter is on the left is only re-decided when the two X positions differ by more
     // than this; closer than that they are treated as level and keep the side they already had

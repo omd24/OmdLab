@@ -9,6 +9,7 @@
 #include "Engine/Components.h"
 #include "Engine/FixedTimestep.h"
 #include "Renderer/Buffer.h"
+#include "Foundation/Log.h"
 #include "Renderer/Texture.h"
 
 #include <DirectXMath.h>
@@ -25,9 +26,9 @@ namespace Game
 
         constexpr float kSpeed = 6.0f;          // World units per second.
         constexpr float kSpawnForward = 0.7f;   // Release point, in front of the caster...
-        constexpr float kSpawnHeight = 1.15f;   // ...at chest height.
+        constexpr float kSpawnHeight = 0.8f;    // ...low enough that a well-timed jump clears it.
         constexpr float kVisualRadius = 0.22f;
-        constexpr DirectX::XMFLOAT3 kHitboxHalfExtents = { 0.25f, 0.25f, 0.3f };
+        constexpr DirectX::XMFLOAT3 kHitboxHalfExtents = { 0.25f, 0.18f, 0.3f };
         constexpr uint32_t kMaxLifetimeTicks = 150;
 
         Renderer::StaticMeshDrawItem CreateSphereDrawItem()
@@ -170,7 +171,45 @@ namespace Game
         }
         for (const entt::entity entity : expired)
         {
+            Foundation::Log::Write(Foundation::Log::Severity::Info, "Projectile", "fireball missed (left the stage or timed out)");
             Release(registry, system, entity);
+        }
+
+        // Two fireballs from different owners that meet cancel each other.
+        {
+            std::vector<entt::entity> live;
+            for (const entt::entity entity : registry.view<Projectile, Engine::Transform>())
+            {
+                live.push_back(entity);
+            }
+            std::vector<entt::entity> cancelled;
+            for (size_t i = 0; i < live.size(); ++i)
+            {
+                for (size_t j = i + 1; j < live.size(); ++j)
+                {
+                    const Projectile& a = registry.get<Projectile>(live[i]);
+                    const Projectile& b = registry.get<Projectile>(live[j]);
+                    if (a.owner == b.owner)
+                    {
+                        continue;
+                    }
+                    const float dx = std::fabs(
+                        registry.get<Engine::Transform>(live[i]).position.x - registry.get<Engine::Transform>(live[j]).position.x);
+                    if (dx < kHitboxHalfExtents.x * 2.0f)
+                    {
+                        cancelled.push_back(live[i]);
+                        cancelled.push_back(live[j]);
+                    }
+                }
+            }
+            for (const entt::entity entity : cancelled)
+            {
+                if (registry.valid(entity))
+                {
+                    Foundation::Log::Write(Foundation::Log::Severity::Info, "Projectile", "fireballs cancelled each other");
+                    Release(registry, system, entity);
+                }
+            }
         }
 
         // Spawn: at the cast's release frame (end of startup), one live projectile per owner.
@@ -185,7 +224,11 @@ namespace Game
             }
             const MoveDefinition* cast = source.moveTable->FindById(kCastMoveId);
             const int32_t hitMoveIndex = source.moveTable->IndexOf(kHitMoveId);
-            if (cast == nullptr || hitMoveIndex < 0 || state.framesInMove != cast->startupFrames ||
+            // Released at the throw pose: the end of the wind-up plus, for a reshaped cast, the
+            // snap into the throw.
+            const uint32_t releaseFrame =
+                cast != nullptr ? cast->startupFrames + (cast->timingCurveActive ? cast->timingSnapFrames : 0u) : 0u;
+            if (cast == nullptr || hitMoveIndex < 0 || state.framesInMove != releaseFrame ||
                 casterData.lastSpawnInstanceId == state.attackInstanceId)
             {
                 continue;
@@ -210,6 +253,7 @@ namespace Game
                 continue;
             }
             casterData.lastSpawnInstanceId = state.attackInstanceId;
+            Foundation::Log::Write(Foundation::Log::Severity::Info, "Projectile", "fireball released");
 
             const float direction = state.facingRight ? 1.0f : -1.0f;
             const Engine::Transform& casterTransform = registry.get<Engine::Transform>(caster);

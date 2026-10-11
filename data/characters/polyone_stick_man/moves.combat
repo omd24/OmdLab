@@ -383,9 +383,19 @@ move fireball
 {
     animationClip "special_fireball_light"
     inputButton Special
-    startup 53
-    active 36
-    recovery 12
+    # The raw clip is 2.7 s with the throw about a third of the way in; the timing fields below
+    # start it partway into the clip and snap to the throw pose, so the projectile is released
+    # ~0.35 s after the button instead of ~0.75 s.
+    startup 24
+    active 4
+    recovery 36
+    impact light
+    timingStart 0.17
+    timingWindup 0.24
+    timingContact 0.35
+    timingSnapFrames 5
+    timingOut 22
+    timingEnd 0.5
     # Explicit: an unauthored lunge is a negative sentinel, not zero.
     lunge 0
     hitStop 0

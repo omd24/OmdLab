@@ -318,6 +318,11 @@ namespace
             b.Wait(120);
             b.CaptureLast(130, "fireball");
         }
+        else if (name == "ai_sim") // Both fighters AI-driven (started by main.cpp); no scripted input.
+        {
+            b.Wait(2300);
+            b.CaptureLast(5, "ai_sim");
+        }
         else if (name == "combo_kkp") // kick, kick, punch -> kick_light -> kick_low -> hook_heavy
         {
             b.Wait(14);
@@ -332,11 +337,11 @@ namespace
         return b.out;
     }
 
-    const std::array<const char*, 32> kScripts = {
+    const std::array<const char*, 33> kScripts = {
         "idle", "punch", "kick", "punchkick", "walk", "walkhalf", "walk_flip", "run_flip", "jump", "jumpfwd",
         "jumpatk_n_p", "jumpatk_n_k", "jumpatk_f_p", "jumpatk_f_k", "jumpatk_b_p", "jumpatk_b_k", "jumpatk_n_pe", "jumpatk_n_ke", "jumpatk_f_ke", "jumpmash",
         "corner_left_level", "corner_left_pass", "corner_right_level",
-        "hook_light", "hook_heavy", "kick_low", "kick_heavy", "combo_ppp", "combo_kkk", "combo_ppk", "combo_kkp", "fireball"
+        "hook_light", "hook_heavy", "kick_low", "kick_heavy", "combo_ppp", "combo_kkk", "combo_ppk", "combo_kkp", "fireball", "ai_sim"
     };
 
     // Dummy world-X for a capture run, before its plan starts (see CaptureRun::DummyX's own

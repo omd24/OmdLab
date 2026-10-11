@@ -24,6 +24,7 @@
 #include "GroundPlane.h"
 #include "InputBindings.h"
 #include "LocalTestScene.h"
+#include "AiOpponent.h"
 #include "Hud.h"
 #include "MatchFlow.h"
 #include "MoveTable.h"
@@ -90,6 +91,19 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
         }
     }
 
+#if defined(OMD_PROTOTYPE)
+    // "--seed N": the AI simulation seed (also used by the headless ai_sim capture).
+    uint32_t initialAiSeed = 1;
+    if (commandLine != nullptr)
+    {
+        const std::wstring cmd(commandLine);
+        const size_t seedFlag = cmd.find(L"--seed ");
+        if (seedFlag != std::wstring::npos)
+        {
+            initialAiSeed = static_cast<uint32_t>(_wtoi(cmd.c_str() + seedFlag + 7));
+        }
+    }
+#endif
 #if defined(OMD_PROTOTYPE)
     // "--hud" alongside --capture keeps the overlay in the captured frames (off by default so
     // scripted output stays comparable between runs).
@@ -195,7 +209,9 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
     {
         const bool dummyLoaded = Game::LoadCharacterDefinition(kCharacterFilePath, dummyDefinition);
         OMD_ASSERT(dummyLoaded, "Failed to load character.combat for the dummy fighter");
+#if !defined(OMD_PROTOTYPE)
         dummyDefinition.moveTable.moves.clear();
+#endif
     }
     std::vector<Renderer::SkinnedMeshDrawItem> dummyDrawItems;
     if (Asset::ImportGltf(characterModelPath.c_str(), characterModel))
@@ -222,6 +238,13 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
         // above, Finalize needs Analyze's detected fractions.
         Game::AnalyzeMoveTiming(characterModel, characterModel.clips, characterDefinition.moveTable);
         Game::FinalizeMoveTiming(characterDefinition.moveTable);
+#if defined(OMD_PROTOTYPE)
+        // The opponent fights with the full moveset (it is loaded from the same file), prepared
+        // exactly like the player's.
+        Game::ResolveHitboxJoints(characterModel, dummyDefinition.moveTable);
+        Game::AnalyzeMoveTiming(characterModel, characterModel.clips, dummyDefinition.moveTable);
+        Game::FinalizeMoveTiming(dummyDefinition.moveTable);
+#endif
         // Locomotion blend space (idle/walk/run by signed movement speed) - the animation
         // source for the Idle/Walk/Run states. Built per CharacterDefinition (both already
         // loaded from the same character.combat, so same clips + stats).
@@ -814,20 +837,127 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
 #endif
     // Puts both fighters back to a fresh round - same recovery the debug Reset button performs
     // for the fighters, without touching camera or tooling state.
+    // Multiplier on both fighters' maximum health (AI simulation doubles it by default so a
+    // fight lasts long enough to read). Applied when a round (re)starts.
+    float healthScale = 1.0f;
     const auto resetRound = [&]()
     {
+        const int scaledFirst = static_cast<int>(characterDefinition.stats.maxHealth * healthScale + 0.5f);
+        const int scaledSecond = static_cast<int>(dummyDefinition.stats.maxHealth * healthScale + 0.5f);
+        const int firstMaxHealth = scaledFirst > 1 ? scaledFirst : 1;
+        const int secondMaxHealth = scaledSecond > 1 ? scaledSecond : 1;
         registry.get<Engine::Transform>(characterEntity) = Engine::Transform{};
         registry.replace<Game::FighterState>(characterEntity, Game::FighterState{});
-        registry.replace<Game::Health>(
-            characterEntity, Game::Health{ characterDefinition.stats.maxHealth, characterDefinition.stats.maxHealth });
+        registry.replace<Game::Health>(characterEntity, Game::Health{ firstMaxHealth, firstMaxHealth });
         registry.get<Engine::Transform>(dummyEntity) = Engine::Transform{ { Game::kDefaultFighterGapX, 0.0f, 0.0f } };
         registry.replace<Game::FighterState>(dummyEntity, Game::FighterState{});
-        registry.replace<Game::Health>(
-            dummyEntity, Game::Health{ dummyDefinition.stats.maxHealth, dummyDefinition.stats.maxHealth });
+        registry.replace<Game::Health>(dummyEntity, Game::Health{ secondMaxHealth, secondMaxHealth });
         dummyPunishCountdown = 0;
         Game::ClearProjectiles(registry, projectileSystem);
         lastCollisionEvents = Engine::CollisionEvents{};
     };
+    // AI opponent / simulation state (see AiOpponent.h). dummyAiPreset 4..6 drive the dummy with
+    // a brain against the human; "AI simulation" drives BOTH fighters, steered by the director.
+    Game::AiBrain playerBrain;
+    Game::AiBrain dummyBrain;
+    Game::FightDirector fightDirector;
+    bool aiSimulation = false;
+    uint32_t aiSeed = initialAiSeed;
+    // Multiplier on the simulation rate (animation included); AI simulation raises it a little
+    // by default so the fight reads with more pace. Adjustable in the debug window.
+    float gameSpeed = 1.0f;
+    // Fast-forward: multiplies the simulation rate on top of gameSpeed (the same pace the
+    // headless capture runs at). Limited by the clock's per-frame catch-up cap (8 ticks).
+    bool fastForward = false;
+    float fastForwardFactor = 4.0f;
+    bool aiHotkeyF4Was = false;
+
+    bool aiHotkeyF2Was = false;
+    bool aiHotkeyF3Was = false;
+    Game::AiFighterView playerView;
+    Game::AiFighterView dummyView;
+    const auto buildView = [&](entt::entity entity, const Game::MoveTable& table)
+    {
+        const Game::FighterState& state = registry.get<Game::FighterState>(entity);
+        const Game::Health& health = registry.get<Game::Health>(entity);
+        Game::AiFighterView view;
+        view.x = registry.get<Engine::Transform>(entity).position.x;
+        view.facingRight = state.facingRight;
+        view.airborne = state.IsAirborne();
+        view.stunned = state.currentState == "HitStun" || state.currentState == "KO";
+        view.knockedOut = state.currentState == "KO";
+        view.attacking = state.currentState == "Attack";
+        view.attackInstance = state.attackInstanceId;
+        view.framesInMove = state.framesInMove;
+        if (view.attacking)
+        {
+            if (const Game::MoveDefinition* move = table.FindById(state.activeMoveId))
+            {
+                view.strikeEndFrame = move->startupFrames + move->activeFrames;
+            }
+        }
+        view.health = health.current;
+        view.maxHealth = health.max;
+        if (view.attacking)
+        {
+            const bool fireball = state.activeMoveId == "fireball";
+            view.castingFireball = fireball;
+            const Game::MoveDefinition* move = table.FindById(state.activeMoveId);
+            const uint32_t startup = move != nullptr ? move->startupFrames : 0u;
+            if (fireball && move != nullptr)
+            {
+                view.releaseFrame = startup + (move->timingCurveActive ? move->timingSnapFrames : 0u);
+            }
+            view.exposed = state.framesInMove >= view.strikeEndFrame || (fireball && state.framesInMove > startup);
+        }
+        // The nearest enemy fireball moving toward this fighter.
+        float nearest = 1.0e9f;
+        for (const entt::entity projectileEntity : registry.view<Game::Projectile, Engine::Transform>())
+        {
+            const Game::Projectile& projectile = registry.get<Game::Projectile>(projectileEntity);
+            if (projectile.owner == entity)
+            {
+                continue;
+            }
+            const float delta = registry.get<Engine::Transform>(projectileEntity).position.x - view.x;
+            if (projectile.velocityX * -delta <= 0.0f)
+            {
+                continue; // Moving away.
+            }
+            const float distance = delta >= 0.0f ? delta : -delta;
+            if (distance < nearest)
+            {
+                nearest = distance;
+                view.incomingProjectile = true;
+                view.incomingDistance = distance;
+                view.incomingId = static_cast<uint32_t>(entt::to_integral(projectileEntity));
+            }
+        }
+        return view;
+    };
+    const auto startAiSimulation = [&]()
+    {
+        aiSimulation = true;
+        if (gameSpeed < 1.2f)
+        {
+            gameSpeed = 1.25f;
+        }
+        if (healthScale < 1.5f)
+        {
+            healthScale = 2.0f;
+        }
+        resetRound();
+        Game::ResetAiBrain(playerBrain, aiSeed);
+        Game::ResetAiBrain(dummyBrain, aiSeed + 7919u);
+        fightDirector.Reset(aiSeed, registry.get<Game::Health>(characterEntity).max, registry.get<Game::Health>(dummyEntity).max);
+    };
+#ifdef OMD_DEV_TOOLS
+    if (captureRun && captureScriptName == "ai_sim")
+    {
+        fightDirector.fightLengthSeconds = 30.0f;
+        startAiSimulation();
+    }
+#endif
     const std::function<void()> hudUI = [&]()
     {
         if (!prototype.hud)
@@ -948,7 +1078,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
         const DirectX::XMFLOAT4X4 viewProjection = Engine::ComputeViewProjection(camera, aspectRatio);
 
 #if defined(OMD_PROTOTYPE)
-        float simDeltaSeconds = deltaSeconds;
+        float simDeltaSeconds = deltaSeconds * gameSpeed * (fastForward ? fastForwardFactor : 1.0f);
         hudDeltaSeconds = deltaSeconds;
         if (prototype.matchFlow)
         {
@@ -970,6 +1100,36 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
         else
         {
             matchFlow.Reset();
+        }
+        {
+            // F2 toggles AI simulation, F3 restarts it with the next seed - usable with the
+            // debug windows hidden.
+            const bool f2Down = Foundation::IsKeyDown(VK_F2);
+            if (f2Down && !aiHotkeyF2Was)
+            {
+                if (aiSimulation)
+                {
+                    aiSimulation = false;
+                }
+                else
+                {
+                    startAiSimulation();
+                }
+            }
+            aiHotkeyF2Was = f2Down;
+            const bool f3Down = Foundation::IsKeyDown(VK_F3);
+            if (f3Down && !aiHotkeyF3Was)
+            {
+                ++aiSeed;
+                startAiSimulation();
+            }
+            aiHotkeyF3Was = f3Down;
+            const bool f4Down = Foundation::IsKeyDown(VK_F4);
+            if (f4Down && !aiHotkeyF4Was)
+            {
+                fastForward = !fastForward;
+            }
+            aiHotkeyF4Was = f4Down;
         }
         floorScrollSeconds += deltaSeconds;
         Game::UpdateStageScroll(stageDrawItems, floorScrollSeconds);
@@ -1009,6 +1169,9 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
 #else
             const bool ignoreGamepadAnalogAxis = false;
 #endif
+#if defined(OMD_PROTOTYPE)
+            const Engine::InputCommand previousPlayerCommand = lastInputCommand;
+#endif
 #ifdef OMD_DEV_TOOLS
             if (captureRun)
             {
@@ -1022,6 +1185,19 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
                 lastInputCommand = Engine::AssembleInputCommand(
                     simClock.tickCount, fighterBindings, lastInputCommand, /*gamepadIndex*/ 0, ignoreGamepadAnalogAxis);
             }
+#if defined(OMD_PROTOTYPE)
+            playerView = buildView(characterEntity, characterDefinition.moveTable);
+            dummyView = buildView(dummyEntity, dummyDefinition.moveTable);
+            if (aiSimulation)
+            {
+                const bool activity = playerView.attacking || dummyView.attacking || playerView.stunned || dummyView.stunned;
+                fightDirector.Update(
+                    Engine::FixedTimestepAccumulator::kFixedDeltaSeconds, playerView.health, dummyView.health, activity);
+                const Game::AiIntent intent =
+                    Game::TickAiBrain(playerBrain, playerView, dummyView, fightDirector.role[0], fightDirector.tuning[0]);
+                Game::ApplyAiIntent(intent, simClock.tickCount, previousPlayerCommand, lastInputCommand);
+            }
+#endif
             playerInputHistory.Push(lastInputCommand);
 
             // Debug readout only for now (Phase 3) - only overwritten on an actual selection
@@ -1135,7 +1311,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
                 constexpr int kDummyFireballPeriodTicks = 150;
                 dummySpecialThisTick = (++dummyFireballTimer % kDummyFireballPeriodTicks) == 0;
             }
-            else // Block then punish
+            else if (dummyAiPreset == 2) // Block then punish
             {
                 dummyBlockThisTick = true;
                 for (const Engine::HitEvent& hit : lastCollisionEvents.hits)
@@ -1162,6 +1338,9 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
             // runs through the real state machine, unconditionally, every tick - reacting to
             // last tick's collision events (from real hurtbox overlap with the player's own
             // Attack hitboxes) exactly like the player's own call above.
+#if defined(OMD_PROTOTYPE)
+            const Engine::InputCommand previousDummyCommand = dummyInputCommand;
+#endif
             dummyInputCommand.tick = simClock.tickCount;
             {
                 Engine::ButtonState& block = dummyInputCommand.buttons[static_cast<size_t>(Game::FighterButton::Block)];
@@ -1182,6 +1361,17 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
                 special.pressedThisTick = dummySpecialThisTick && !specialWasHeld;
                 special.releasedThisTick = !dummySpecialThisTick && specialWasHeld;
             }
+#if defined(OMD_PROTOTYPE)
+            if (aiSimulation || dummyAiPreset >= 4)
+            {
+                const Game::AiRole dummyRole = aiSimulation ? fightDirector.role[1] : Game::AiRole::Neutral;
+                const Game::AiTuning dummyTuning =
+                    aiSimulation ? fightDirector.tuning[1]
+                                 : Game::TuningForProfile(static_cast<Game::AiProfile>(std::clamp(dummyAiPreset - 4, 0, 2)));
+                const Game::AiIntent intent = Game::TickAiBrain(dummyBrain, dummyView, playerView, dummyRole, dummyTuning);
+                Game::ApplyAiIntent(intent, simClock.tickCount, previousDummyCommand, dummyInputCommand);
+            }
+#endif
             dummyInputHistory.Push(dummyInputCommand);
             Game::UpdateFighterState(
                 registry, dummyEntity,
@@ -1293,9 +1483,9 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
                 const Game::FighterState& sideDummyState = registry.get<Game::FighterState>(dummyEntity);
                 Foundation::Log::Write(
                     Foundation::Log::Severity::Info, "Side",
-                    "t%u player x=%.3f y=%.2f faceR=%d %s %s | dummy x=%.3f faceR=%d %s hp=%d", simClock.tickCount, sidePlayer.position.x,
+                    "t%u player x=%.3f y=%.2f faceR=%d %s %s php=%d | dummy x=%.3f faceR=%d %s hp=%d", simClock.tickCount, sidePlayer.position.x,
                     sidePlayer.position.y, sidePlayerState.facingRight ? 1 : 0, sidePlayerState.currentState.c_str(),
-                    sidePlayerState.activeMoveId.c_str(), sideDummy.position.x, sideDummyState.facingRight ? 1 : 0,
+                    sidePlayerState.activeMoveId.c_str(), registry.get<Game::Health>(characterEntity).current, sideDummy.position.x, sideDummyState.facingRight ? 1 : 0,
                     sideDummyState.currentState.c_str(), registry.get<Game::Health>(dummyEntity).current);
             }
 #endif
@@ -1457,6 +1647,13 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
             {
                 showAnimationEditor = true;
             }
+#if defined(OMD_PROTOTYPE)
+            // Same switch as the one next to the AI simulation controls (and F4).
+            ImGui::Checkbox("Fast-forward (F4)", &fastForward);
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(120.0f);
+            ImGui::SliderFloat("##fastForwardFactorMain", &fastForwardFactor, 1.5f, 8.0f, "x%.1f");
+#endif
         };
         auto debugSectionUI = [&]()
         {
@@ -1633,7 +1830,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
                     dummyHealth.current, dummyHealth.max, dummyTransform.position.x, dummyTransform.position.y);
             }
             // See dummyAiPreset's own declaration - a testing convenience, not real AI.
-            static const char* kDummyAiPresetNames[] = { "Manual", "Always block", "Block then punish", "Fireball (every 2.5s)" };
+            static const char* kDummyAiPresetNames[] = { "Manual", "Always block", "Block then punish", "Fireball (every 2.5s)", "AI: Passive", "AI: Reactive", "AI: Aggressive" };
             ImGui::Combo("Dummy AI", &dummyAiPreset, kDummyAiPresetNames, IM_ARRAYSIZE(kDummyAiPresetNames));
             ImGui::BeginDisabled(dummyAiPreset != 0);
             ImGui::Checkbox("Dummy blocks", &dummyBlocksHeld);
@@ -1645,6 +1842,45 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
             ImGui::SeparatorText("Prototype");
             ImGui::Checkbox("HUD (health bars / K.O. banner)", &prototype.hud);
             ImGui::Checkbox("Match flow (K.O. slow-mo + auto reset)", &prototype.matchFlow);
+            {
+                bool simulation = aiSimulation;
+                if (ImGui::Checkbox("AI simulation - both fighters (F2)", &simulation))
+                {
+                    if (simulation)
+                    {
+                        startAiSimulation();
+                    }
+                    else
+                    {
+                        aiSimulation = false;
+                    }
+                }
+                int seed = static_cast<int>(aiSeed);
+                if (ImGui::InputInt("Seed", &seed))
+                {
+                    aiSeed = static_cast<uint32_t>(seed > 0 ? seed : 0);
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Restart with next seed (F3)"))
+                {
+                    ++aiSeed;
+                    startAiSimulation();
+                }
+                ImGui::SliderFloat("Fight length (s)", &fightDirector.fightLengthSeconds, 20.0f, 180.0f);
+                ImGui::SliderFloat("Game speed", &gameSpeed, 0.5f, 2.0f);
+                ImGui::Checkbox("Fast-forward (F4)", &fastForward);
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(120.0f);
+                ImGui::SliderFloat("##fastForwardFactor", &fastForwardFactor, 1.5f, 8.0f, "x%.1f");
+                ImGui::SliderFloat("Health scale (next round)", &healthScale, 0.5f, 4.0f);
+                if (aiSimulation)
+                {
+                    static const char* kRoleNames[] = { "Neutral", "Attacker", "Defender" };
+                    ImGui::Text(
+                        "t=%.1fs%s  P1: %s  P2: %s", fightDirector.elapsedSeconds, fightDirector.finale ? " FINALE" : "",
+                        kRoleNames[static_cast<int>(fightDirector.role[0])], kRoleNames[static_cast<int>(fightDirector.role[1])]);
+                }
+            }
 #endif
 
             // Combined with "Collision debug draw" above (RenderTasks' own toggle) - this alone

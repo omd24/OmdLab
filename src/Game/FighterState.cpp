@@ -1122,6 +1122,20 @@ namespace Game
                         // HitStun from the previous one.
                         const bool wasBlocking =
                             previousState != "Run" && input.thisTickInput.buttons[static_cast<size_t>(FighterButton::Block)].held;
+                        {
+                            const FighterState* attackerForLog = registry.try_get<FighterState>(attackingEntity);
+                            const Engine::Transform* attackerPos = registry.try_get<Engine::Transform>(attackingEntity);
+                            const Engine::Transform& defenderPos = registry.get<Engine::Transform>(entity);
+                            Foundation::Log::Write(
+                                Foundation::Log::Severity::Info, "Hit",
+                                "%s hit by '%s' (attacker %s%s%s f%u, dx=%.2f dy=%.2f)%s", previousState.c_str(), attackingMove->id.c_str(),
+                                attackerForLog != nullptr ? attackerForLog->currentState.c_str() : "projectile",
+                                attackerForLog != nullptr ? " " : "", attackerForLog != nullptr ? attackerForLog->activeMoveId.c_str() : "",
+                                attackerForLog != nullptr ? attackerForLog->framesInMove : 0u,
+                                attackerPos != nullptr ? std::fabs(attackerPos->position.x - defenderPos.position.x) : -1.0f,
+                                attackerPos != nullptr ? attackerPos->position.y - defenderPos.position.y : 0.0f,
+                                wasBlocking ? " BLOCKED" : "");
+                        }
                         EnterState(state, input.characterDefinition, "");
 
                         // Impact hitstop - freeze both fighters for the attacking move's authored
