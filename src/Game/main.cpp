@@ -542,6 +542,18 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
     // just renders whatever hitboxTuningFrameCounter currently holds).
     bool hitboxTuningPaused = false;
 
+    // "Clip timing" panel state (Animation Editor window, animationEditorUI below) - shares the
+    // move selection / Pause / Frame scrub state above (same previewMove, same live preview via
+    // PreviewMoveHitbox), just its own Save button/message so a hitbox edit and a timing edit
+    // save independently, same precedent as "Character"'s own separate save just below. Raw
+    // authored ticks, same round-trip reasoning as koDropStartFrameRawUI (MoveDefinition::
+    // timingOutFrames is rescaled by kCombatSpeedMultiplier at load - see MoveTable.cpp's own
+    // comment on why it's treated as a game-feel tick count, not a hitbox-style frame offset) -
+    // reseeded from the newly-selected move wherever hitboxTuningMoveIndex itself changes, since
+    // each move's own timingOutFrames differs.
+    int timingOutRawUI = 0;
+    std::string timingSaveMessage;
+
     // "Character" tuning panel state (debugSectionUI below). groundingOffsetY / koDropOffsetY
     // sliders bind straight to characterDefinition (1:1 with character.combat). The two KO frame
     // sliders present RAW clip frames - characterDefinition stores them already divided by
@@ -1495,22 +1507,196 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
             ImGui::Text("Hits: %zu  Triggers: %zu", lastCollisionEvents.hits.size(), lastCollisionEvents.triggers.size());
         };
 
-        // Clip preview/scrub and hitbox placement - both work the same way (drive the character
-        // from an isolated preview rather than real input/state, watch it, drag a number, Save)
-        // and neither is needed for ordinary play, which is why they share a window kept closed
-        // by default (see showAnimationEditor's own declaration) instead of living in
-        // fighterDebugUI above. Future clip-timing work (trimming/reshaping which part of a long
-        // source clip a move actually plays - see DESIGN_LOG.md) belongs here too, alongside
-        // Manual clip override, once built.
+        // Move preview/scrub, hitbox placement, and clip timing - all three drive the character
+        // from an isolated preview rather than real input/state, watch it, drag a number, Save,
+        // and none is needed for ordinary play, which is why they share a window kept closed by
+        // default (see showAnimationEditor's own declaration) instead of living in
+        // fighterDebugUI above. "Move" is the shared anchor for all three (which move's preview
+        // is Hitbox tuning/Clip timing below actually editing); "Manual clip override" is a
+        // separate, unrelated tool (a raw clip, not tied to any move) and sits at the bottom for
+        // that reason - see its own comment below.
         auto animationEditorUI = [&]()
         {
+            // "None" (index 0 here, -1 in hitboxTuningMoveIndex) hands the character back to
+            // real gameplay - see hitboxTuningMoveIndex's own declaration.
+            ImGui::SeparatorText("Move");
+            int hitboxTuningComboIndex = hitboxTuningMoveIndex + 1;
+            if (ImGui::Combo(
+                    "Move", &hitboxTuningComboIndex, hitboxTuningMoveNames.data(), static_cast<int>(hitboxTuningMoveNames.size())))
+            {
+                hitboxTuningMoveIndex = hitboxTuningComboIndex - 1;
+                hitboxTuningFrameCounter = 0;
+                hitboxTuningBoxIndex = 0;
+                hitboxTuningSaveMessage.clear();
+                timingSaveMessage.clear();
+                timingOutRawUI = (hitboxTuningMoveIndex >= 0 &&
+                                   hitboxTuningMoveIndex < static_cast<int>(characterDefinition.moveTable.moves.size()))
+                                      ? static_cast<int>(std::lround(
+                                            static_cast<float>(
+                                                characterDefinition.moveTable.moves[static_cast<size_t>(hitboxTuningMoveIndex)]
+                                                    .timingOutFrames) *
+                                            Game::kCombatSpeedMultiplier))
+                                      : 0;
+            }
+
+            if (hitboxTuningMoveIndex >= 0 && hitboxTuningMoveIndex < static_cast<int>(characterDefinition.moveTable.moves.size()))
+            {
+                Game::MoveDefinition& previewMove = characterDefinition.moveTable.moves[static_cast<size_t>(hitboxTuningMoveIndex)];
+
+                // Preview - pause and scrub straight to a keyframe instead of chasing a
+                // continuously-looping playback. Drives the exact code path a real Attack uses
+                // (Game::PreviewMoveHitbox -> ApplyStateEffects), so this is a frame-accurate look
+                // at the actual WARPED playback the selected move produces in real combat - not
+                // an approximation, and not the same thing "Manual clip override" below shows
+                // (that one plays the raw, unwarped clip, with no move data involved at all).
+                // Shared by Hitbox tuning and Clip timing underneath: enable "Collision debug
+                // draw" (Renderer Debug window) and "Force show all hitboxes" (Fighter Debug
+                // window) to watch a hitbox continuously while scrubbing here.
+                ImGui::SeparatorText("Preview");
+                ImGui::Checkbox("Pause", &hitboxTuningPaused);
+                const uint32_t previewTotalFrames = previewMove.startupFrames + previewMove.activeFrames + previewMove.recoveryFrames;
+                int hitboxTuningFrameSlider = static_cast<int>(hitboxTuningFrameCounter);
+                ImGui::BeginDisabled(!hitboxTuningPaused);
+                if (ImGui::SliderInt(
+                        "Frame", &hitboxTuningFrameSlider, 0, static_cast<int>(previewTotalFrames > 0 ? previewTotalFrames - 1 : 0)))
+                {
+                    hitboxTuningFrameCounter = static_cast<uint32_t>(hitboxTuningFrameSlider);
+                }
+                ImGui::EndDisabled();
+                ImGui::Text(
+                    "startup=%u active=%u recovery=%u", previewMove.startupFrames, previewMove.activeFrames,
+                    previewMove.recoveryFrames);
+
+                ImGui::SeparatorText("Hitbox tuning");
+                if (previewMove.hitboxes.empty())
+                {
+                    ImGui::TextDisabled("Selected move has no hitboxes");
+                }
+                else
+                {
+                    // Only shown once a move actually has more than one hitbox (none do
+                    // today) - no point cluttering the common single-hitbox case with a
+                    // slider that only ever reads 0.
+                    if (previewMove.hitboxes.size() > 1)
+                    {
+                        ImGui::SliderInt("Hitbox index", &hitboxTuningBoxIndex, 0, static_cast<int>(previewMove.hitboxes.size()) - 1);
+                        hitboxTuningSaveMessage.clear();
+                    }
+                    hitboxTuningBoxIndex = std::clamp(hitboxTuningBoxIndex, 0, static_cast<int>(previewMove.hitboxes.size()) - 1);
+                    Game::MoveHitboxDef& hitboxDef = previewMove.hitboxes[static_cast<size_t>(hitboxTuningBoxIndex)];
+                    Engine::CollisionBox& box = hitboxDef.box;
+                    ImGui::SliderFloat3("Offset", &box.offset.x, -1.0f, 1.0f, "%.3f");
+                    ImGui::SliderFloat3("Half-extents", &box.halfExtents.x, 0.05f, 1.5f, "%.3f");
+                    // Active-frame window - defaults to [startup, startup+active) (see
+                    // MoveHitboxDef's own comment) but tunable independently here, since
+                    // that default often doesn't line up with when THIS specific retargeted
+                    // clip's own bone is actually near a target - scrub "Frame" above (with
+                    // "Force show all hitboxes" on) to find where contact really looks
+                    // right, then drag these two to match.
+                    int frameStartSlider = static_cast<int>(hitboxDef.frameStart);
+                    int frameEndSlider = static_cast<int>(hitboxDef.frameEnd);
+                    const int previewTotalFramesInt = static_cast<int>(previewTotalFrames);
+                    if (ImGui::SliderInt("Active start frame", &frameStartSlider, 0, previewTotalFramesInt))
+                    {
+                        hitboxDef.frameStart = static_cast<uint32_t>(frameStartSlider);
+                    }
+                    if (ImGui::SliderInt("Active end frame", &frameEndSlider, 0, previewTotalFramesInt))
+                    {
+                        hitboxDef.frameEnd = static_cast<uint32_t>(frameEndSlider);
+                    }
+                    if (ImGui::Button("Save to moves.combat"))
+                    {
+                        const bool saved = Game::SaveHitboxToFile(
+                            kMovesFilePath, previewMove.id, hitboxTuningBoxIndex, box, hitboxDef.frameStart, hitboxDef.frameEnd);
+                        hitboxTuningSaveMessage = saved ? "Saved." : "Save failed - see logs/omdlab.log.";
+                    }
+                    if (!hitboxTuningSaveMessage.empty())
+                    {
+                        ImGui::SameLine();
+                        ImGui::TextDisabled("%s", hitboxTuningSaveMessage.c_str());
+                    }
+                }
+
+                // Trims either side of the windup->contact core WarpedClipSeconds already
+                // plays (FighterState.cpp's own comment on the full four-segment shape) -
+                // Start skips a lazy lead-in, Out/End decide how much of the clip's
+                // post-contact follow-through actually shows before the pose hands off to
+                // idle/jump, instead of that always happening on the very first tick past
+                // contact (today's hardcoded default, still the default here too - every
+                // slider below starts at the value that reproduces it exactly). Same move,
+                // same Pause/Frame scrub above - pause and drag "Frame" past startup+active
+                // to watch this segment.
+                ImGui::SeparatorText("Clip timing");
+                if (!previewMove.HasTimingCurve())
+                {
+                    ImGui::TextDisabled("Selected move has no timing curve (no impact set) - clip timing has no effect");
+                }
+                else
+                {
+                    bool timingChanged = false;
+                    float startFraction = previewMove.timingStartFraction;
+                    // std::clamp, not std::max - Windows.h's own min/max macros (NOMINMAX
+                    // isn't defined in this project) break a bare std::max the same way they
+                    // break std::min elsewhere in this file.
+                    if (ImGui::SliderFloat(
+                            "Start (clip fraction)", &startFraction, 0.0f, std::clamp(previewMove.timingWindupFraction, 0.0f, 1.0f),
+                            "%.3f"))
+                    {
+                        previewMove.timingStartFraction = startFraction;
+                        timingChanged = true;
+                    }
+
+                    // Bound matches FinalizeMoveTiming's own clamp exactly (MoveTable.cpp) -
+                    // a value tuned here can never be silently reduced on the next load.
+                    const uint32_t afterContact = previewMove.startupFrames + std::max<uint32_t>(1u, previewMove.timingSnapFrames);
+                    const uint32_t maxOutRuntime = previewTotalFrames > afterContact ? previewTotalFrames - afterContact : 0;
+                    const int maxOutRawUI =
+                        static_cast<int>(std::lround(static_cast<float>(maxOutRuntime) * Game::kCombatSpeedMultiplier));
+                    timingOutRawUI = std::clamp(timingOutRawUI, 0, maxOutRawUI);
+                    if (ImGui::SliderInt("Out (ticks past contact)", &timingOutRawUI, 0, maxOutRawUI))
+                    {
+                        previewMove.timingOutFrames =
+                            static_cast<uint32_t>(std::lround(static_cast<float>(timingOutRawUI) / Game::kCombatSpeedMultiplier));
+                        timingChanged = true;
+                    }
+
+                    float endFraction = previewMove.timingEndFraction;
+                    if (ImGui::SliderFloat(
+                            "End (clip fraction)", &endFraction, std::clamp(previewMove.timingContactFraction, 0.0f, 1.0f), 1.0f,
+                            "%.3f"))
+                    {
+                        previewMove.timingEndFraction = endFraction;
+                        timingChanged = true;
+                    }
+                    if (timingChanged)
+                    {
+                        timingSaveMessage.clear();
+                    }
+                    if (ImGui::Button("Save timing to moves.combat"))
+                    {
+                        const bool saved = Game::SaveMoveTimingToFile(
+                            kMovesFilePath, previewMove.id, previewMove.timingStartFraction, static_cast<uint32_t>(timingOutRawUI),
+                            previewMove.timingEndFraction);
+                        timingSaveMessage = saved ? "Saved." : "Save failed - see logs/omdlab.log.";
+                    }
+                    if (!timingSaveMessage.empty())
+                    {
+                        ImGui::SameLine();
+                        ImGui::TextDisabled("%s", timingSaveMessage.c_str());
+                    }
+                }
+            }
+
+            // A raw clip, independent of the Move picker above - no move needs to exist yet.
+            // Useful for reading a brand-new clip's own real length/poses (see "Timing a move" in
+            // the combat guide) before a move's startup/active/recovery are even authored, which
+            // is the one thing "Preview" above genuinely can't do (it needs an already-defined
+            // move's own frame budget to scrub against). Off by default: UpdateFighterState
+            // (Idle/Walk/Run/Attack/.../KO) owns this entity's clip during real play and would
+            // otherwise overwrite any manual pick made below on the very next tick.
             if (!characterClipNames.empty())
             {
-                // Off by default: UpdateFighterState (Idle/Walk/Run/Attack/.../KO) owns this
-                // entity's clip during real play and would otherwise overwrite any manual pick
-                // made below on the very next tick. Flip this on to preview one clip in
-                // isolation, same workflow as before the state machine existed.
-                ImGui::SeparatorText("Manual clip override");
+                ImGui::SeparatorText("Manual clip override (raw clip, no move)");
                 ImGui::Checkbox("Manual clip override", &manualClipOverride);
                 Engine::Animator& characterAnimator = registry.get<Engine::Animator>(characterEntity);
                 int clipIndex = characterAnimator.clipIndex;
@@ -1543,98 +1729,6 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
                     }
                 }
                 ImGui::EndDisabled();
-            }
-
-            // Hitbox authoring/adjustment tooling - see hitboxTuningMoveIndex's own
-            // declaration for how the tick loop uses this. "None" (index 0 here, -1 in
-            // hitboxTuningMoveIndex) hands the character back to real gameplay. Enable
-            // "Collision debug draw" (Renderer Debug window) to actually see the box while
-            // tuning, and "Force show all hitboxes" (Fighter Debug window) to watch it across
-            // the whole state instead of racing its own authored active window.
-            ImGui::SeparatorText("Hitbox tuning");
-            {
-                int hitboxTuningComboIndex = hitboxTuningMoveIndex + 1;
-                if (ImGui::Combo(
-                        "Move", &hitboxTuningComboIndex, hitboxTuningMoveNames.data(), static_cast<int>(hitboxTuningMoveNames.size())))
-                {
-                    hitboxTuningMoveIndex = hitboxTuningComboIndex - 1;
-                    hitboxTuningFrameCounter = 0;
-                    hitboxTuningBoxIndex = 0;
-                    hitboxTuningSaveMessage.clear();
-                }
-                if (hitboxTuningMoveIndex >= 0 && hitboxTuningMoveIndex < static_cast<int>(characterDefinition.moveTable.moves.size()))
-                {
-                    Game::MoveDefinition& previewMove = characterDefinition.moveTable.moves[static_cast<size_t>(hitboxTuningMoveIndex)];
-
-                    // A continuously-looping preview is hard to tune against - hold a specific
-                    // keyframe still (Pause) and scrub to it directly (Frame) instead of chasing
-                    // a moving target. The slider only accepts input while paused (BeginDisabled
-                    // below) - unpaused, the tick loop's own auto-advance would just immediately
-                    // overwrite a drag.
-                    ImGui::Checkbox("Pause", &hitboxTuningPaused);
-                    const uint32_t previewTotalFrames = previewMove.startupFrames + previewMove.activeFrames + previewMove.recoveryFrames;
-                    int hitboxTuningFrameSlider = static_cast<int>(hitboxTuningFrameCounter);
-                    ImGui::BeginDisabled(!hitboxTuningPaused);
-                    if (ImGui::SliderInt(
-                            "Frame", &hitboxTuningFrameSlider, 0, static_cast<int>(previewTotalFrames > 0 ? previewTotalFrames - 1 : 0)))
-                    {
-                        hitboxTuningFrameCounter = static_cast<uint32_t>(hitboxTuningFrameSlider);
-                    }
-                    ImGui::EndDisabled();
-                    ImGui::Text(
-                        "startup=%u active=%u recovery=%u", previewMove.startupFrames, previewMove.activeFrames,
-                        previewMove.recoveryFrames);
-
-                    if (previewMove.hitboxes.empty())
-                    {
-                        ImGui::TextDisabled("Selected move has no hitboxes");
-                    }
-                    else
-                    {
-                        // Only shown once a move actually has more than one hitbox (none do
-                        // today) - no point cluttering the common single-hitbox case with a
-                        // slider that only ever reads 0.
-                        if (previewMove.hitboxes.size() > 1)
-                        {
-                            ImGui::SliderInt(
-                                "Hitbox index", &hitboxTuningBoxIndex, 0, static_cast<int>(previewMove.hitboxes.size()) - 1);
-                            hitboxTuningSaveMessage.clear();
-                        }
-                        hitboxTuningBoxIndex = std::clamp(hitboxTuningBoxIndex, 0, static_cast<int>(previewMove.hitboxes.size()) - 1);
-                        Game::MoveHitboxDef& hitboxDef = previewMove.hitboxes[static_cast<size_t>(hitboxTuningBoxIndex)];
-                        Engine::CollisionBox& box = hitboxDef.box;
-                        ImGui::SliderFloat3("Offset", &box.offset.x, -1.0f, 1.0f, "%.3f");
-                        ImGui::SliderFloat3("Half-extents", &box.halfExtents.x, 0.05f, 1.5f, "%.3f");
-                        // Active-frame window - defaults to [startup, startup+active) (see
-                        // MoveHitboxDef's own comment) but tunable independently here, since
-                        // that default often doesn't line up with when THIS specific retargeted
-                        // clip's own bone is actually near a target - scrub "Frame" above (with
-                        // "Force show all hitboxes" on) to find where contact really looks
-                        // right, then drag these two to match.
-                        int frameStartSlider = static_cast<int>(hitboxDef.frameStart);
-                        int frameEndSlider = static_cast<int>(hitboxDef.frameEnd);
-                        const int previewTotalFramesInt = static_cast<int>(previewTotalFrames);
-                        if (ImGui::SliderInt("Active start frame", &frameStartSlider, 0, previewTotalFramesInt))
-                        {
-                            hitboxDef.frameStart = static_cast<uint32_t>(frameStartSlider);
-                        }
-                        if (ImGui::SliderInt("Active end frame", &frameEndSlider, 0, previewTotalFramesInt))
-                        {
-                            hitboxDef.frameEnd = static_cast<uint32_t>(frameEndSlider);
-                        }
-                        if (ImGui::Button("Save to moves.combat"))
-                        {
-                            const bool saved = Game::SaveHitboxToFile(
-                                kMovesFilePath, previewMove.id, hitboxTuningBoxIndex, box, hitboxDef.frameStart, hitboxDef.frameEnd);
-                            hitboxTuningSaveMessage = saved ? "Saved." : "Save failed - see logs/omdlab.log.";
-                        }
-                        if (!hitboxTuningSaveMessage.empty())
-                        {
-                            ImGui::SameLine();
-                            ImGui::TextDisabled("%s", hitboxTuningSaveMessage.c_str());
-                        }
-                    }
-                }
             }
         };
 
@@ -1793,6 +1887,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
             hitboxTuningFrameCounter = 0;
             hitboxTuningPaused = false;
             hitboxTuningSaveMessage.clear();
+            timingSaveMessage.clear();
             registry.get<Engine::Transform>(testTriggerEntity).position.x = -2.0f;
             // Also recovers the character's own fighter state/health - previously left out, which
             // meant landing in KO (whether from real play or the test-hitbox slider above) had no

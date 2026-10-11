@@ -193,6 +193,9 @@ namespace Game
                 else if (name == "timingSnapFrames") move.timingSnapFrames = static_cast<uint32_t>(value.numberValue);
                 else if (name == "hitStop") move.hitStopFrames = static_cast<uint32_t>(value.numberValue);
                 else if (name == "lunge") move.lungeDistance = static_cast<float>(value.numberValue);
+                else if (name == "timingStart") move.timingStartFraction = static_cast<float>(value.numberValue);
+                else if (name == "timingOut") move.timingOutFrames = static_cast<uint32_t>(value.numberValue);
+                else if (name == "timingEnd") move.timingEndFraction = static_cast<float>(value.numberValue);
                 else Foundation::Log::Write(Severity::Warning, "MoveTable", "unknown field '%s' on move '%s'", name.c_str(), move.id.c_str());
             }
 
@@ -216,6 +219,8 @@ namespace Game
                     move.timingSnapFrames = static_cast<uint32_t>(std::lround(static_cast<float>(move.timingSnapFrames) * speedScale));
                 if (move.hitStopFrames != MoveDefinition::kUnsetFrames)
                     move.hitStopFrames = static_cast<uint32_t>(std::lround(static_cast<float>(move.hitStopFrames) * speedScale));
+                if (move.timingOutFrames != MoveDefinition::kUnsetFrames)
+                    move.timingOutFrames = static_cast<uint32_t>(std::lround(static_cast<float>(move.timingOutFrames) * speedScale));
             }
 
             for (const CombatDsl::FieldBlock& hitboxBlock : moveDecl.hitboxes)
@@ -503,6 +508,33 @@ namespace Game
             if (move.timingContactFraction < 0.0f) move.timingContactFraction = 0.5f;
             if (move.timingWindupFraction < 0.0f) move.timingWindupFraction = move.timingContactFraction * 0.4f;
 
+            // Clip trim defaults - see MoveDefinition's own comment. Unset -> exactly today's
+            // shape (start at clip 0, settle held flat at contact, end irrelevant while it never
+            // moves).
+            if (move.timingStartFraction < 0.0f) move.timingStartFraction = 0.0f;
+            if (move.timingEndFraction < 0.0f) move.timingEndFraction = 1.0f;
+            if (move.timingOutFrames == MoveDefinition::kUnsetFrames) move.timingOutFrames = 0;
+            // Clamped to however many ticks actually remain after contact (startup+snap) within
+            // this move's own state duration (startup+active+recovery) - an authored value past
+            // that would either silently disable the recovery-blend-out crossfade entirely
+            // (ApplyStateEffects's own `state.stateDurationFrames > motionFrames` check going
+            // false) or, worse, read the settle segment past where a defending hitbox check still
+            // expects contact-adjacent numbers. The Animation Editor's own "Out" slider mirrors
+            // this exact formula for its own upper bound, so a value tuned there can never need
+            // clamping here - this guards a hand-edited .combat file, not the normal path.
+            {
+                const uint32_t afterContact = move.startupFrames + move.timingSnapFrames;
+                const uint32_t stateTotal = move.startupFrames + move.activeFrames + move.recoveryFrames;
+                const uint32_t maxOutFrames = stateTotal > afterContact ? stateTotal - afterContact : 0;
+                if (move.timingOutFrames > maxOutFrames)
+                {
+                    Foundation::Log::Write(
+                        Severity::Warning, "MoveTable", "move '%s': timingOut %u exceeds available frames (%u) - clamped",
+                        move.id.c_str(), move.timingOutFrames, maxOutFrames);
+                    move.timingOutFrames = maxOutFrames;
+                }
+            }
+
             move.timingCurveActive = true;
             Foundation::Log::Write(
                 Severity::Info, "MoveTable", "move '%s' feel: impact=%.2f -> hitStop=%u lunge=%.2f (windup=%.2f contact=%.2f snap=%u)",
@@ -711,6 +743,163 @@ namespace Game
         Foundation::Log::Write(
             Severity::Info, "MoveTable", "SaveHitboxToFile: saved hitbox #%d of move '%s' to '%s'", hitboxIndex, moveId.c_str(),
             filePath.c_str());
+        return true;
+    }
+
+    bool SaveMoveTimingToFile(
+        const std::string& filePath, const std::string& moveId, float timingStart, uint32_t timingOutRaw, float timingEnd)
+    {
+        // Same targeted line-rewrite/insert approach as SaveHitboxToFile (see its own comment on
+        // binary mode / CRLF and on why a missing field line inserts rather than fails), scoped
+        // to the MOVE's own top-level fields directly instead of a nested hitbox{} block - these
+        // three live alongside timingWindup/timingContact/timingSnapFrames, not inside a hitbox.
+        std::ifstream in(filePath, std::ios::binary);
+        if (!in.is_open())
+        {
+            Foundation::Log::Write(
+                Severity::Error, "MoveTable", "SaveMoveTimingToFile: failed to open '%s' for reading", filePath.c_str());
+            return false;
+        }
+        std::vector<std::string> lines;
+        {
+            std::string line;
+            while (std::getline(in, line))
+            {
+                if (!line.empty() && line.back() == '\r')
+                {
+                    line.pop_back();
+                }
+                lines.push_back(line);
+            }
+        }
+        in.close();
+
+        int depth = 0;
+        bool inTargetMove = false;
+        bool enteredMoveBody = false;
+        int moveHeaderDepth = 0;
+        bool foundMove = false;
+        // Line index of the target move's own closing '}' - captured so a missing field line can
+        // be inserted right before it, same role hitboxCloseLine plays in SaveHitboxToFile.
+        size_t moveCloseLine = 0;
+        std::string capturedIndent;
+        const std::string moveHeaderText = "move " + moveId;
+
+        struct FieldTarget
+        {
+            const char* name;
+            float value;
+            bool written;
+        };
+        FieldTarget targets[3] = {
+            { "timingStart", timingStart, false },
+            { "timingOut", static_cast<float>(timingOutRaw), false },
+            { "timingEnd", timingEnd, false },
+        };
+
+        for (size_t i = 0; i < lines.size(); ++i)
+        {
+            const std::string stripped = StripCombatComment(lines[i]);
+            const std::string trimmed = TrimCombatLine(stripped);
+            const int depthBefore = depth;
+
+            if (!inTargetMove && depthBefore == 0 && trimmed == moveHeaderText)
+            {
+                inTargetMove = true;
+                foundMove = true;
+                moveHeaderDepth = depthBefore;
+            }
+            // Only the move's own DIRECT top-level lines - a nested hitbox{}/cancel{} sub-block
+            // sits at moveHeaderDepth + 2 or deeper by the time its own lines are scanned, so it
+            // can never be mistaken for one of these three regardless of what it happens to
+            // contain.
+            else if (inTargetMove && depthBefore == moveHeaderDepth + 1)
+            {
+                const size_t firstNonSpace = lines[i].find_first_not_of(" \t");
+                if (firstNonSpace != std::string::npos)
+                {
+                    const size_t tokenEnd = trimmed.find_first_of(" \t");
+                    const std::string fieldName = tokenEnd == std::string::npos ? trimmed : trimmed.substr(0, tokenEnd);
+                    for (FieldTarget& target : targets)
+                    {
+                        if (!target.written && fieldName == target.name)
+                        {
+                            const std::string indent = lines[i].substr(0, firstNonSpace);
+                            lines[i] = indent + target.name + " " + FormatCombatNumber(target.value);
+                            target.written = true;
+                            if (capturedIndent.empty())
+                            {
+                                capturedIndent = indent;
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+
+            for (const char c : stripped)
+            {
+                if (c == '{') ++depth;
+                else if (c == '}') --depth;
+            }
+
+            if (inTargetMove)
+            {
+                if (depth > moveHeaderDepth)
+                {
+                    enteredMoveBody = true;
+                }
+                else if (enteredMoveBody && depth == moveHeaderDepth)
+                {
+                    moveCloseLine = i;
+                    break; // Target move's own body is closed - nothing left to find.
+                }
+            }
+        }
+
+        if (!foundMove)
+        {
+            Foundation::Log::Write(
+                Severity::Error, "MoveTable", "SaveMoveTimingToFile: move '%s' not found in '%s'", moveId.c_str(), filePath.c_str());
+            return false;
+        }
+        // Falls back to a plausible default only if the move body had no OTHER top-level field
+        // line to copy indentation from at all (a near-empty move) - every real move here has
+        // animationClip/inputButton/etc. at minimum, so this is a defensive fallback, not the
+        // expected path.
+        if (capturedIndent.empty())
+        {
+            capturedIndent = "    ";
+        }
+
+        std::vector<std::string> linesToInsert;
+        for (const FieldTarget& target : targets)
+        {
+            if (!target.written)
+            {
+                linesToInsert.push_back(capturedIndent + target.name + " " + FormatCombatNumber(target.value));
+            }
+        }
+        if (!linesToInsert.empty())
+        {
+            lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(moveCloseLine), linesToInsert.begin(), linesToInsert.end());
+        }
+
+        std::ofstream out(filePath, std::ios::binary | std::ios::trunc);
+        if (!out.is_open())
+        {
+            Foundation::Log::Write(
+                Severity::Error, "MoveTable", "SaveMoveTimingToFile: failed to open '%s' for writing", filePath.c_str());
+            return false;
+        }
+        for (const std::string& outLine : lines)
+        {
+            out << outLine << "\n";
+        }
+        out.close();
+
+        Foundation::Log::Write(
+            Severity::Info, "MoveTable", "SaveMoveTimingToFile: saved timing for move '%s' to '%s'", moveId.c_str(), filePath.c_str());
         return true;
     }
 

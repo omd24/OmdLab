@@ -98,6 +98,29 @@ namespace Game
         uint32_t hitStopFrames = kUnsetFrames;      // both fighters freeze on contact, runtime ticks
         float lungeDistance = -1.0f;                // forward world-units, decelerating to a plant at the strike
 
+        // --- Clip trim: the five-point shape WarpedClipSeconds (FighterState.cpp) actually
+        // plays is start -> windup -> contact -> [settle, timingOut ticks long] -> end, not just
+        // windup -> contact. These three extend it past the two above, and all default to
+        // exactly today's shape (start 0, settle held flat at contact until the state hands off,
+        // end - irrelevant while settle never moves) - every move omitting all three is
+        // numerically identical to before this existed, same "escape hatch, not the normal
+        // surface" status as timingContact/timingWindup. Authored/tuned via the Animation
+        // Editor's "Clip timing" panel (main.cpp), which previews live through the SAME
+        // ApplyStateEffects path real gameplay uses (via PreviewMoveHitbox), not a separate
+        // approximation.
+        float timingStartFraction = -1.0f;   // clip fraction the windup segment glides FROM (was hardcoded 0)
+        // Runtime ticks (kUnsetFrames = unset -> 0) the settle segment gets, past contact, before
+        // the pose hands off to the recovery-blend-out crossfade (FighterState.cpp's own comment
+        // on ApplyStateEffects' `motionFrames`) - 0 means "hand off immediately at contact", the
+        // pre-existing hardcoded behavior (the settle segment below was, until this field
+        // existed, dead code: every real move handed off on its very first settle tick, so the
+        // clip's own post-contact frames - a big follow-through's whole retract, say - were
+        // never actually sampled in real play, whatever the clip's own length). Rescaled by
+        // 1/kCombatSpeedMultiplier at load like timingSnapFrames/hitStopFrames - the same
+        // "game-feel tick count" convention, not a hitbox active-window offset.
+        uint32_t timingOutFrames = kUnsetFrames;
+        float timingEndFraction = -1.0f;     // clip fraction the settle segment glides TOWARD over timingOutFrames (was hardcoded 1.0)
+
         // Set by FinalizeMoveTiming once the reshaped playback is on and every field above is
         // resolved. Gates reshaped vs. flat playback in FighterState.cpp.
         bool timingCurveActive = false;
@@ -297,4 +320,17 @@ namespace Game
     bool SaveCharacterToFile(
         const std::string& filePath, float groundingOffsetY, float koDropOffsetY, uint32_t koDropStartFrameRaw,
         uint32_t koDropEndFrameRaw);
+
+    // The dev-tools "Clip timing" panel's "Save" counterpart to SaveHitboxToFile - same targeted
+    // line-rewrite/insert approach, but for timingStart/timingOut/timingEnd (MoveDefinition's own
+    // comment), which live at the MOVE's own top level (same depth as the existing
+    // timingWindup/timingContact/timingSnapFrames fields), not inside a hitbox{} sub-block. A
+    // missing line for any of the three is expected (most moves have none of them authored,
+    // defaulting in code instead) and gets a new line inserted right before the move's own
+    // closing "}", never treated as failure - only "move <moveId> not found at all" is.
+    // timingOutRaw is RAW authored ticks (the caller multiplies the speed-scaled runtime value
+    // back up by kCombatSpeedMultiplier first, same convention SaveCharacterToFile's KO frame
+    // params already use).
+    bool SaveMoveTimingToFile(
+        const std::string& filePath, const std::string& moveId, float timingStart, uint32_t timingOutRaw, float timingEnd);
 }

@@ -62,11 +62,12 @@ namespace
     }
 
     // Reshapes an attack's clip playback from a tick count into a seconds offset, when the move
-    // authored a timing curve. THREE segments over the move's own [startup | active | recovery]
+    // authored a timing curve. FOUR segments over the move's own [startup | active | recovery]
     // budget, all measured in the same speed-scaled ticks framesInMove counts in:
-    //   1. wind-up  [0, startup)          clip 0 -> windupFraction, smoothstep (settles into the coil)
-    //   2. snap     [startup, startup+snap) windupFraction -> contactFraction, smoothstep (explosive but continuous)
-    //   3. settle   [.., total)           contactFraction -> 1, smootherstep
+    //   1. wind-up [0, startup)            startFraction -> windupFraction, smoothstep (settles into the coil)
+    //   2. snap    [startup, startup+snap) windupFraction -> contactFraction, smoothstep (explosive but continuous)
+    //   3. settle  [.., startup+snap+timingOutFrames) contactFraction -> endFraction, smootherstep
+    //   4. held    [.., total)             pinned at wherever settle left off
     // Every segment boundary meets at ~zero clip-time velocity, so playback never lurches - the
     // old design's hard "hold" segment butting against a power-curve ramp is exactly what made
     // the end of a move stutter. The soft dwell at the strike now comes for free: both the snap
@@ -74,6 +75,18 @@ namespace
     // applied separately (FighterState::hitStopRemaining) - the animation itself never stops.
     // The result is never wrapped/looped; it ends just shy of the clip's final frame and the
     // Attack state exits (animationFinished) before it would matter.
+    //
+    // startFraction/timingOutFrames/endFraction (MoveDefinition's own comment) all default to
+    // exactly the ORIGINAL three-segment shape: start at clip 0, and settle's own duration
+    // (timingOutFrames) defaults to 0, which pins segment 3 at u=0 - i.e. AT contactFraction,
+    // never moving - regardless of what endFraction resolves to. That default duration of 0 is
+    // load-bearing, not just "off": in real gameplay (not this preview), ApplyStateEffects hands
+    // the pose off to the recovery-blend-out crossfade at that exact SAME tick (its own
+    // `motionFrames` uses this identical startup+snap+timingOutFrames sum) - segment 3 moving at
+    // all would otherwise be dead code there, sampled for zero ticks before the crossfade takes
+    // over. Segment 4 (past timingOutFrames) only matters here, in a scrubbed/looped preview that
+    // outlives real gameplay's own hand-off (Game::PreviewMoveHitbox) - real gameplay never
+    // reaches it, since the state itself either hands off or ends first.
     float WarpedClipSeconds(const Game::MoveDefinition& move, uint32_t framesInMove, float clipDuration)
     {
         const float startup = static_cast<float>(move.startupFrames);
@@ -85,12 +98,17 @@ namespace
         }
         const float windupFraction = std::clamp(move.timingWindupFraction, 0.0f, 1.0f);
         const float contactFraction = std::clamp(move.timingContactFraction, 0.0f, 1.0f);
+        // Clamped relative to windup/contact, not just [0,1] - an authored value on the wrong
+        // side of its own neighbor would otherwise make that segment visibly scrub backward.
+        const float startFraction = std::clamp(move.timingStartFraction, 0.0f, windupFraction);
+        const float endFraction = std::clamp(move.timingEndFraction, contactFraction, 1.0f);
+        const float outFrames = static_cast<float>(move.timingOutFrames);
         const float f = static_cast<float>(framesInMove);
 
         float fraction;
         if (f < startup && startup > 0.0f)
         {
-            fraction = windupFraction * SmoothStep01(f / startup);
+            fraction = startFraction + (windupFraction - startFraction) * SmoothStep01(f / startup);
         }
         else if (f < startup + snap)
         {
@@ -98,9 +116,10 @@ namespace
         }
         else
         {
-            const float denom = total - startup - snap;
-            const float u = denom > 0.0f ? (f - startup - snap) / denom : 1.0f;
-            fraction = contactFraction + (1.0f - contactFraction) * SmootherStep01(u);
+            // u pinned at 0 (not 1) when timingOutFrames is 0 - see this function's own header
+            // comment on why that specific default matters.
+            const float u = outFrames > 0.0f ? std::clamp((f - startup - snap) / outFrames, 0.0f, 1.0f) : 0.0f;
+            fraction = contactFraction + (endFraction - contactFraction) * SmootherStep01(u);
         }
 
         float seconds = std::clamp(fraction, 0.0f, 1.0f) * clipDuration;
@@ -451,13 +470,13 @@ namespace
                     }
                 }
 
-                // Hand the pose off to a smooth crossfade-to-idle (the "recovery blend-out")
-                // right after the strike LANDS - contact is ~startup + snap - not at the end of
-                // the authored active window. The few frames between contact and active-end are
-                // the warped clip playing its OWN retract, which (especially with a short
-                // recovery) yanks the limb back unnaturally fast; letting the blend-out own the
-                // entire return keeps it smooth and lets the state end promptly so the player
-                // isn't input-locked watching a recovery animation. The hitbox window is
+                // Hand the pose off to a smooth crossfade-to-idle (the "recovery blend-out") once
+                // the move's own settle segment has run its course - contact (~startup + snap)
+                // plus however many further ticks timingOutFrames authors (0 by default - see
+                // WarpedClipSeconds's own comment on why the two share this exact sum). Not later
+                // than that: the warp curve's own settle segment, compressed by a short recovery,
+                // would otherwise race the clip's own retract past this point and the handoff
+                // would snap the limb back hard instead of easing it. The hitbox window is
                 // unchanged (checked above independently) - it just tracks a pose that's already
                 // easing home over its last frame or two. Needs a locomotion blend space to
                 // fade toward - every real character has one. Falls back to active-end for a
@@ -465,10 +484,8 @@ namespace
                 uint32_t motionFrames = activeMove->startupFrames + activeMove->activeFrames;
                 if (activeMove->HasTimingCurve())
                 {
-                    // Hand off exactly at contact (end of the snap segment). Not a frame later:
-                    // the warp curve's settle segment, compressed by a short recovery, races the
-                    // clip's own retract and the handoff snaps the limb back hard.
-                    motionFrames = activeMove->startupFrames + std::max<uint32_t>(1u, activeMove->timingSnapFrames);
+                    motionFrames = activeMove->startupFrames + std::max<uint32_t>(1u, activeMove->timingSnapFrames) +
+                                    activeMove->timingOutFrames;
                 }
                 if (state.framesInMove >= motionFrames && state.stateDurationFrames > motionFrames)
                 {
@@ -1209,6 +1226,16 @@ namespace Game
         previewState.activeMoveId = moveId;
         previewState.framesInState = frameCounter;
         previewState.framesInMove = frameCounter;
+        // Matches EnterState's own computation - without it, stateDurationFrames stays 0 and
+        // ApplyStateEffects' own `state.stateDurationFrames > motionFrames` guard never passes,
+        // silently suppressing the recovery-blend-out crossfade for the ENTIRE preview (it would
+        // just keep sampling WarpedClipSeconds's settle segment past where real gameplay hands
+        // off). Real gameplay's own hand-off tick is exactly what the Animation Editor's "Clip
+        // timing" panel needs to preview accurately, so this has to match.
+        if (const MoveDefinition* move = characterDefinition.moveTable.FindById(moveId))
+        {
+            previewState.stateDurationFrames = move->startupFrames + move->activeFrames + move->recoveryFrames;
+        }
         ApplyStateEffects(
             registry, entity, previewState, characterDefinition, Engine::InputCommand{}, availableClips, characterModel,
             forceShowAllHitboxes);
