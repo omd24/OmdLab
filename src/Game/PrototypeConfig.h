@@ -10,6 +10,7 @@ namespace Game
     {
         bool hud = true;       // Health bars and the K.O. banner.
         bool matchFlow = true; // K.O. slow-motion, banner hold and automatic round reset.
+        bool juice = true;     // Hit flash, camera shake, extra K.O. hitstop.
     };
 }
 

@@ -26,6 +26,7 @@
 #include "LocalTestScene.h"
 #include "AiOpponent.h"
 #include "Hud.h"
+#include "Juice.h"
 #include "MatchFlow.h"
 #include "MoveTable.h"
 #include "PrototypeConfig.h"
@@ -108,6 +109,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
     // "--hud" alongside --capture keeps the overlay in the captured frames (off by default so
     // scripted output stays comparable between runs).
     const bool captureKeepsHud = commandLine != nullptr && std::wstring(commandLine).find(L"--hud") != std::wstring::npos;
+    const bool captureKeepsJuice = commandLine != nullptr && std::wstring(commandLine).find(L"--juice") != std::wstring::npos;
 #endif
 
     Engine::PrintDependencyChain();
@@ -478,11 +480,13 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
         }
     }
     // TODO(OM): replace per-fighter tints with real palettes/costumes.
+    const DirectX::XMFLOAT4 fighterBaseTint[2] = { { 0.72f, 0.86f, 1.0f, 1.0f }, { 1.0f, 0.74f, 0.68f, 1.0f } };
+    Renderer::BufferHandle fighterTintBuffer[2];
     {
-        const DirectX::XMFLOAT4 firstTint = { 0.72f, 0.86f, 1.0f, 1.0f };
-        const DirectX::XMFLOAT4 secondTint = { 1.0f, 0.74f, 0.68f, 1.0f };
-        const Renderer::BufferHandle firstTintBuffer = Renderer::Buffer::Create(&firstTint, sizeof(firstTint));
-        const Renderer::BufferHandle secondTintBuffer = Renderer::Buffer::Create(&secondTint, sizeof(secondTint));
+        const Renderer::BufferHandle firstTintBuffer = Renderer::Buffer::Create(&fighterBaseTint[0], sizeof(DirectX::XMFLOAT4));
+        const Renderer::BufferHandle secondTintBuffer = Renderer::Buffer::Create(&fighterBaseTint[1], sizeof(DirectX::XMFLOAT4));
+        fighterTintBuffer[0] = firstTintBuffer;
+        fighterTintBuffer[1] = secondTintBuffer;
         for (Renderer::SkinnedMeshDrawItem& item : characterDrawItems)
         {
             item.tintBuffer = firstTintBuffer;
@@ -828,11 +832,13 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
     Game::MatchFlow matchFlow;
     Game::HudState hudState;
     float hudDeltaSeconds = 0.0f;
+    Game::JuiceState juice;
 #ifdef OMD_DEV_TOOLS
     if (captureRun)
     {
         prototype.hud = captureKeepsHud;
         prototype.matchFlow = false;
+        prototype.juice = captureKeepsJuice;
     }
 #endif
     // Puts both fighters back to a fresh round - same recovery the debug Reset button performs
@@ -1075,7 +1081,29 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
             camera.position.x += (midpointX - camera.position.x) * followT;
         }
         const float aspectRatio = static_cast<float>(Renderer::Device::GetWidth()) / static_cast<float>(Renderer::Device::GetHeight());
+#if defined(OMD_PROTOTYPE)
+        // Presentation only: the shake displaces a copy of the camera, never the camera itself.
+        Engine::Camera shakenCamera = camera;
+        if (prototype.juice)
+        {
+            juice.Update(deltaSeconds);
+            const DirectX::XMFLOAT2 shake = juice.ShakeOffset();
+            shakenCamera.position.x += shake.x;
+            shakenCamera.position.y += shake.y;
+        }
+        else
+        {
+            juice = Game::JuiceState{};
+        }
+        for (int side = 0; side < 2; ++side)
+        {
+            const DirectX::XMFLOAT4 tint = juice.TintFor(side, fighterBaseTint[side]);
+            Renderer::Buffer::Update(fighterTintBuffer[side], &tint, sizeof(tint));
+        }
+        const DirectX::XMFLOAT4X4 viewProjection = Engine::ComputeViewProjection(shakenCamera, aspectRatio);
+#else
         const DirectX::XMFLOAT4X4 viewProjection = Engine::ComputeViewProjection(camera, aspectRatio);
+#endif
 
 #if defined(OMD_PROTOTYPE)
         float simDeltaSeconds = deltaSeconds * gameSpeed * (fastForward ? fastForwardFactor : 1.0f);
@@ -1171,6 +1199,18 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
 #endif
 #if defined(OMD_PROTOTYPE)
             const Engine::InputCommand previousPlayerCommand = lastInputCommand;
+            struct HitSnapshot
+            {
+                entt::entity lastHitBy;
+                uint32_t lastHitInstance;
+                int health;
+            };
+            const auto snapshotFor = [&](entt::entity entity)
+            {
+                const Game::FighterState& state = registry.get<Game::FighterState>(entity);
+                return HitSnapshot{ state.lastHitByAttacker, state.lastHitByAttackerInstanceId, registry.get<Game::Health>(entity).current };
+            };
+            const HitSnapshot beforeFighters[2] = { snapshotFor(characterEntity), snapshotFor(dummyEntity) };
 #endif
 #ifdef OMD_DEV_TOOLS
             if (captureRun)
@@ -1466,6 +1506,36 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
             // behind a dragged slider - intentional, an honest side effect of ticks/frames being
             // decoupled, not a bug).
 #if defined(OMD_PROTOTYPE)
+            if (prototype.juice)
+            {
+                // A hit registered this tick: the fighter's last-hit bookkeeping changed.
+                const entt::entity fighters[2] = { characterEntity, dummyEntity };
+                for (int side = 0; side < 2; ++side)
+                {
+                    const Game::FighterState& state = registry.get<Game::FighterState>(fighters[side]);
+                    if (state.lastHitByAttacker == beforeFighters[side].lastHitBy &&
+                        state.lastHitByAttackerInstanceId == beforeFighters[side].lastHitInstance)
+                    {
+                        continue;
+                    }
+                    const int health = registry.get<Game::Health>(fighters[side]).current;
+                    const bool knockout = health <= 0;
+                    const bool blocked = state.hitReactionClip == "block_hit";
+                    juice.OnHit(side, beforeFighters[side].health - health, blocked, knockout);
+                    if (knockout)
+                    {
+                        // A longer freeze on the finishing blow.
+                        for (const entt::entity entity : fighters)
+                        {
+                            Game::FighterState& frozen = registry.get<Game::FighterState>(entity);
+                            if (frozen.hitStopRemaining < 10u)
+                            {
+                                frozen.hitStopRemaining = 10u;
+                            }
+                        }
+                    }
+                }
+            }
             Game::UpdateProjectiles(registry, projectileSystem, lastCollisionEvents);
 #endif
             lastCollisionEvents = Engine::ResolveCollisions(registry);
@@ -1842,6 +1912,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
             ImGui::SeparatorText("Prototype");
             ImGui::Checkbox("HUD (health bars / K.O. banner)", &prototype.hud);
             ImGui::Checkbox("Match flow (K.O. slow-mo + auto reset)", &prototype.matchFlow);
+            ImGui::Checkbox("Juice (hit flash, camera shake)", &prototype.juice);
             {
                 bool simulation = aiSimulation;
                 if (ImGui::Checkbox("AI simulation - both fighters (F2)", &simulation))
