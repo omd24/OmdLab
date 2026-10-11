@@ -1,6 +1,7 @@
 #include "Asset/GltfImporter.h"
 #include "Engine/Animation.h"
 #include "Engine/Animator.h"
+#include "Engine/Audio.h"
 #include "Engine/Camera.h"
 #include "Engine/Collision.h"
 #include "Engine/Components.h"
@@ -26,6 +27,7 @@
 #include "LocalTestScene.h"
 #include "AiOpponent.h"
 #include "Hud.h"
+#include "SfxCues.h"
 #include "Juice.h"
 #include "MatchFlow.h"
 #include "MoveTable.h"
@@ -833,12 +835,19 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
     Game::HudState hudState;
     float hudDeltaSeconds = 0.0f;
     Game::JuiceState juice;
+    Game::SfxCues sfxCues;
+    Engine::Audio::LoopId runLoop[2] = { -1, -1 };
+    uint32_t whiffHandledInstance[2] = { 0, 0 };
+    uint32_t sfxSeenCancelled = 0;
+    bool audioReady = false;
 #ifdef OMD_DEV_TOOLS
     if (captureRun)
     {
         prototype.hud = captureKeepsHud;
         prototype.matchFlow = false;
         prototype.juice = captureKeepsJuice;
+        prototype.sfx = false;
+        prototype.music = false;
     }
 #endif
     // Puts both fighters back to a fresh round - same recovery the debug Reset button performs
@@ -861,6 +870,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
         dummyPunishCountdown = 0;
         Game::ClearProjectiles(registry, projectileSystem);
         lastCollisionEvents = Engine::CollisionEvents{};
+        sfxCues.OnRoundReset();
     };
     // AI opponent / simulation state (see AiOpponent.h). dummyAiPreset 4..6 drive the dummy with
     // a brain against the human; "AI simulation" drives BOTH fighters, steered by the director.
@@ -877,6 +887,9 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
     bool fastForward = false;
     float fastForwardFactor = 4.0f;
     bool aiHotkeyF4Was = false;
+    bool sfxHotkeyF5Was = false;
+    bool sfxHotkeyF6Was = false;
+    bool sfxHotkeyF7Was = false;
 
     bool aiHotkeyF2Was = false;
     bool aiHotkeyF3Was = false;
@@ -957,6 +970,18 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
         Game::ResetAiBrain(dummyBrain, aiSeed + 7919u);
         fightDirector.Reset(aiSeed, registry.get<Game::Health>(characterEntity).max, registry.get<Game::Health>(dummyEntity).max);
     };
+    if (prototype.sfx || prototype.music)
+    {
+        audioReady = Engine::Audio::Init();
+        if (audioReady)
+        {
+            sfxCues.Load();
+            if (prototype.music)
+            {
+                Engine::Audio::PlayMusic("music_loop", prototype.musicVolume);
+            }
+        }
+    }
 #ifdef OMD_DEV_TOOLS
     if (captureRun && captureScriptName == "ai_sim")
     {
@@ -1106,6 +1131,12 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
 #endif
 
 #if defined(OMD_PROTOTYPE)
+        if (audioReady)
+        {
+            Engine::Audio::SetMusicVolume(prototype.music ? prototype.musicVolume : 0.0f);
+        }
+        sfxCues.SetScale(prototype.sfxVolume);
+        sfxCues.Tick(deltaSeconds);
         float simDeltaSeconds = deltaSeconds * gameSpeed * (fastForward ? fastForwardFactor : 1.0f);
         hudDeltaSeconds = deltaSeconds;
         if (prototype.matchFlow)
@@ -1158,6 +1189,29 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
                 fastForward = !fastForward;
             }
             aiHotkeyF4Was = f4Down;
+            // F5: next fixed SFX variant (with random off). F6: random picks on/off.
+            const bool f5Down = Foundation::IsKeyDown(VK_F5);
+            if (f5Down && !sfxHotkeyF5Was)
+            {
+                sfxCues.CycleVariant();
+                Foundation::Log::Write(Foundation::Log::Severity::Info, "Sfx", "fixed variant -> %d", sfxCues.FixedVariant() + 1);
+            }
+            sfxHotkeyF5Was = f5Down;
+            const bool f6Down = Foundation::IsKeyDown(VK_F6);
+            if (f6Down && !sfxHotkeyF6Was)
+            {
+                sfxCues.SetRandomized(!sfxCues.Randomized());
+                Foundation::Log::Write(Foundation::Log::Severity::Info, "Sfx", "random picks %s", sfxCues.Randomized() ? "ON" : "OFF");
+            }
+            sfxHotkeyF6Was = f6Down;
+            // F7: sparse / full SFX density.
+            const bool f7Down = Foundation::IsKeyDown(VK_F7);
+            if (f7Down && !sfxHotkeyF7Was)
+            {
+                sfxCues.SetSparse(!sfxCues.Sparse());
+                Foundation::Log::Write(Foundation::Log::Severity::Info, "Sfx", "sparse SFX %s", sfxCues.Sparse() ? "ON" : "OFF");
+            }
+            sfxHotkeyF7Was = f7Down;
         }
         floorScrollSeconds += deltaSeconds;
         Game::UpdateStageScroll(stageDrawItems, floorScrollSeconds);
@@ -1204,11 +1258,15 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
                 entt::entity lastHitBy;
                 uint32_t lastHitInstance;
                 int health;
+                uint32_t attackInstance;
+                bool airborne;
+                bool attacking;
             };
             const auto snapshotFor = [&](entt::entity entity)
             {
                 const Game::FighterState& state = registry.get<Game::FighterState>(entity);
-                return HitSnapshot{ state.lastHitByAttacker, state.lastHitByAttackerInstanceId, registry.get<Game::Health>(entity).current };
+                return HitSnapshot{ state.lastHitByAttacker, state.lastHitByAttackerInstanceId, registry.get<Game::Health>(entity).current,
+                                    state.attackInstanceId, state.IsAirborne(), state.currentState == "Attack" };
             };
             const HitSnapshot beforeFighters[2] = { snapshotFor(characterEntity), snapshotFor(dummyEntity) };
 #endif
@@ -1440,6 +1498,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
                     dummyState.framesInState >= dummyDefinition.koDropEndFrame + kUndyingReviveHoldFrames)
                 {
                     dummyState = Game::FighterState{};
+                    sfxCues.OnRoundReset();
                     registry.replace<Game::Health>(
                         dummyEntity, Game::Health{ dummyDefinition.stats.maxHealth, dummyDefinition.stats.maxHealth });
                 }
@@ -1506,10 +1565,73 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
             // behind a dragged slider - intentional, an honest side effect of ticks/frames being
             // decoupled, not a bug).
 #if defined(OMD_PROTOTYPE)
-            if (prototype.juice)
+            if (prototype.juice || (prototype.sfx && audioReady))
             {
-                // A hit registered this tick: the fighter's last-hit bookkeeping changed.
                 const entt::entity fighters[2] = { characterEntity, dummyEntity };
+                for (int side = 0; side < 2; ++side)
+                {
+                    const Game::FighterState& state = registry.get<Game::FighterState>(fighters[side]);
+                    if (prototype.sfx && audioReady)
+                    {
+                        if (state.currentState == "Attack" && state.attackInstanceId != beforeFighters[side].attackInstance)
+                        {
+                            // Attacking at the start of the tick = cancelled into: a link in a string.
+                            sfxCues.OnAttackStarted(state.activeMoveId, beforeFighters[side].attacking);
+                        }
+                        // An attack that has not connected a few ticks into its strike whiffs.
+                        if (state.currentState == "Attack" && state.attackInstanceId != whiffHandledInstance[side])
+                        {
+                            const Game::MoveTable& moveTable = side == 0 ? characterDefinition.moveTable : dummyDefinition.moveTable;
+                            const Game::MoveDefinition* move = moveTable.FindById(state.activeMoveId);
+                            if (move != nullptr && !move->hitboxes.empty() && state.framesInMove >= move->startupFrames + 3u)
+                            {
+                                whiffHandledInstance[side] = state.attackInstanceId;
+                                if (!state.moveHitConfirmed)
+                                {
+                                    sfxCues.OnWhiff();
+                                }
+                            }
+                        }
+                        // The footstep loop follows the Run state.
+                        const bool running = state.currentState == "Run";
+                        if (running && runLoop[side] < 0)
+                        {
+                            sfxCues.OnRunStart(static_cast<float>(simClock.tickCount) / 60.0f);
+                            runLoop[side] = sfxCues.StartRun();
+                        }
+                        else if (!running && runLoop[side] >= 0)
+                        {
+                            sfxCues.StopRun(runLoop[side]);
+                            runLoop[side] = -1;
+                        }
+                        const bool airborne = state.IsAirborne();
+                        if (airborne && !beforeFighters[side].airborne && state.currentState == "Jump")
+                        {
+                            sfxCues.OnJump();
+                        }
+                        else if (!airborne && beforeFighters[side].airborne)
+                        {
+                            sfxCues.OnLand();
+                        }
+                    }
+                }
+                if (prototype.sfx && audioReady)
+                {
+                    bool fireballLive = false;
+                    for (const entt::entity projectileEntity : registry.view<Game::Projectile>())
+                    {
+                        (void)projectileEntity;
+                        fireballLive = true;
+                        break;
+                    }
+                    sfxCues.SetFireballInFlight(fireballLive);
+                }
+                if (prototype.sfx && audioReady && projectileSystem.cancelledPairs != sfxSeenCancelled)
+                {
+                    sfxSeenCancelled = projectileSystem.cancelledPairs;
+                    sfxCues.OnFireballCancelled();
+                }
+                // A hit registered this tick: the fighter's last-hit bookkeeping changed.
                 for (int side = 0; side < 2; ++side)
                 {
                     const Game::FighterState& state = registry.get<Game::FighterState>(fighters[side]);
@@ -1521,6 +1643,17 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
                     const int health = registry.get<Game::Health>(fighters[side]).current;
                     const bool knockout = health <= 0;
                     const bool blocked = state.hitReactionClip == "block_hit";
+                    const bool byFireball =
+                        state.lastHitByAttacker != entt::null && registry.valid(state.lastHitByAttacker) &&
+                        registry.all_of<Game::Projectile>(state.lastHitByAttacker);
+                    if (prototype.sfx && audioReady)
+                    {
+                        sfxCues.OnHit(beforeFighters[side].health - health, blocked, byFireball, knockout);
+                    }
+                    if (!prototype.juice)
+                    {
+                        continue;
+                    }
                     juice.OnHit(side, beforeFighters[side].health - health, blocked, knockout);
                     if (knockout)
                     {
@@ -1913,6 +2046,48 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
             ImGui::Checkbox("HUD (health bars / K.O. banner)", &prototype.hud);
             ImGui::Checkbox("Match flow (K.O. slow-mo + auto reset)", &prototype.matchFlow);
             ImGui::Checkbox("Juice (hit flash, camera shake)", &prototype.juice);
+            ImGui::Checkbox("SFX", &prototype.sfx);
+            ImGui::SameLine();
+            ImGui::Checkbox("Music", &prototype.music);
+            ImGui::SliderFloat("SFX volume", &prototype.sfxVolume, 0.0f, 3.0f);
+            ImGui::SliderFloat("Music volume", &prototype.musicVolume, 0.0f, 1.0f);
+            {
+                bool randomized = sfxCues.Randomized();
+                if (ImGui::Checkbox("Random SFX picks (F6)", &randomized))
+                {
+                    sfxCues.SetRandomized(randomized);
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Next variant (F5)"))
+                {
+                    sfxCues.CycleVariant();
+                }
+                ImGui::SameLine();
+                ImGui::Text("fixed: %d", sfxCues.FixedVariant() + 1);
+                bool sparse = sfxCues.Sparse();
+                if (ImGui::Checkbox("Sparse SFX (F7)", &sparse))
+                {
+                    sfxCues.SetSparse(sparse);
+                }
+                ImGui::Text("SFX families:");
+                ImGui::Checkbox("Attack swing/voice: always", &sfxCues.categories.attackAlways);
+                ImGui::Checkbox("Attack swing/voice: after K.O.", &sfxCues.categories.attackAfterKo);
+                ImGui::Checkbox("Hit sound", &sfxCues.categories.hit);
+                ImGui::Checkbox("Whiff swing sound", &sfxCues.categories.whiff);
+                ImGui::SliderFloat("Hit level", &sfxCues.categories.hitVolume, 0.0f, 3.0f);
+                ImGui::SliderFloat("Whiff level", &sfxCues.categories.whiffVolume, 0.0f, 3.0f);
+                ImGui::SliderFloat("K.O. cry level", &sfxCues.categories.koVolume, 0.0f, 2.0f);
+                if (ImGui::Button("Solo hits"))
+                {
+                    auto& c = sfxCues.categories;
+                    c.attackAlways = c.attackAfterKo = c.whiff = c.jump = c.fireball = c.run = c.koCry = false;
+                    c.hit = true;
+                }
+                ImGui::Checkbox("Jump / land", &sfxCues.categories.jump);
+                ImGui::Checkbox("Fireball", &sfxCues.categories.fireball);
+                ImGui::Checkbox("Run", &sfxCues.categories.run);
+                ImGui::Checkbox("K.O. cry", &sfxCues.categories.koCry);
+            }
             {
                 bool simulation = aiSimulation;
                 if (ImGui::Checkbox("AI simulation - both fighters (F2)", &simulation))
@@ -2432,6 +2607,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
             dummyPunishCountdown = 0;
 #if defined(OMD_PROTOTYPE)
             Game::ClearProjectiles(registry, projectileSystem);
+            sfxCues.OnRoundReset();
 #endif
             // Also drop the last-resolved hit(s) - UpdateFighterState reacts to lastCollisionEvents
             // one tick late (see its own comment on why), so without this a hitbox that was still
@@ -2459,6 +2635,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
 #endif
     }
 
+    Engine::Audio::Shutdown();
     Renderer::RenderTasks::Shutdown();
     Foundation::Log::Shutdown();
     return 0;

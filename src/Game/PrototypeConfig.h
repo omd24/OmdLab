@@ -11,6 +11,10 @@ namespace Game
         bool hud = true;       // Health bars and the K.O. banner.
         bool matchFlow = true; // K.O. slow-motion, banner hold and automatic round reset.
         bool juice = true;     // Hit flash, camera shake, extra K.O. hitstop.
+        bool sfx = true;       // Attack, fireball, movement and K.O. sounds (per-family switches in SfxCues).
+        bool music = true;     // Looping music track.
+        float sfxVolume = 1.05f;
+        float musicVolume = 0.10f;
     };
 }
 

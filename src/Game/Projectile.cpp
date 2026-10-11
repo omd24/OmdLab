@@ -207,6 +207,7 @@ namespace Game
                 if (registry.valid(entity))
                 {
                     Foundation::Log::Write(Foundation::Log::Severity::Info, "Projectile", "fireballs cancelled each other");
+                    ++system.cancelledPairs; // Counted per projectile; two per pair.
                     Release(registry, system, entity);
                 }
             }

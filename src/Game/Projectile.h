@@ -42,6 +42,7 @@ namespace Game
     {
         std::vector<Renderer::StaticMeshDrawItem> drawItems;
         std::vector<entt::entity> slotEntity; // entt::null when the slot is free.
+        uint32_t cancelledPairs = 0; // Running count of fireball-vs-fireball cancellations.
     };
 
     ProjectileSystem CreateProjectileSystem(size_t capacity);

@@ -9,6 +9,10 @@ Each library keeps its own license, included alongside it:
 
 - `thirdParty/cgltf/` — MIT (`cgltf/LICENSE`)
 - `thirdParty/imgui/` — MIT (`imgui/LICENSE.txt`)
+- `thirdParty/miniaudio/` — public domain / MIT-0 (`miniaudio/LICENSE`)
+- `data/audio/ko_yell2.wav`, `attack_yell.wav`, `unused/*` — derived from "Male Grunt/Yelling sounds" by HaelD (https://opengameart.org/content/male-gruntyelling-sounds), CC0 1.0
+- `data/audio/whiff_cc0_*.wav` — derived from "Swishes Sound Pack" by artisticdude (https://opengameart.org/content/swishes-sound-pack), CC0 1.0
+- `data/audio/hit_cc0_*.wav` — derived from Kenney "Impact Sounds" (https://kenney.nl/assets/impact-sounds), CC0 1.0
 - `thirdParty/sharpmake/` — Apache License 2.0 (`sharpmake/LICENSE.md`)
 
 The DirectX Agility SDK and DirectX Shader Compiler are pulled in via NuGet

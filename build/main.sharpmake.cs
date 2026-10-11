@@ -170,6 +170,10 @@ public class Engine : OmdLabProjectBase
         // and has no use for an image-decoding library itself.
         conf.IncludePaths.Add(@"[project.SharpmakeCsPath]/../thirdParty/stb");
 
+        // miniaudio (vendored under thirdParty/miniaudio/, pinned to v0.11.22): single header,
+        // implementation compiled in Engine/Audio.cpp.
+        conf.IncludePaths.Add(@"[project.SharpmakeCsPath]/../thirdParty/miniaudio");
+
         // EnTT, single header, fully inline/template-based - no _IMPLEMENTATION define needed, unlike cgltf/stb_image.
         conf.IncludePaths.Add(@"[project.SharpmakeCsPath]/../thirdParty/entt");
     }
