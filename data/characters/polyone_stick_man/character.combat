@@ -39,7 +39,7 @@ character
         # sits above the soles, so without this every pose renders slightly above the floor.
         # Render/collision-space only - "position.y == 0 means grounded" stays true as a gameplay
         # contract. Tuned live from the dev-tools "Character" panel; 0 disables it.
-        groundingOffsetY -0.08
+        groundingOffsetY -0.18
     }
 
     # KO settle-to-ground ramp. The retargeted "ko" clip animates the fall with its root joint

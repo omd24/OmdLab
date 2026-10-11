@@ -32,12 +32,14 @@ namespace
 
     Renderer::PipelineHandle g_pipelineHandle;
     Renderer::PipelineHandle g_transparentPipelineHandle;
+    Renderer::PipelineHandle g_shadowPipelineHandle;
     Renderer::BufferHandle g_cameraBufferHandle;
     // Bound at CBV slot 3 whenever a draw item doesn't set its own tintBuffer (index == -1) -
     // white/opaque, mirroring StaticMeshPassDX12's own default-tint fallback. Never Update()-d.
     Renderer::BufferHandle g_defaultTintBufferHandle;
     std::vector<Renderer::SkinnedMeshDrawItem> g_opaqueDrawItems;
     std::vector<Renderer::SkinnedMeshDrawItem> g_transparentDrawItems;
+    std::vector<Renderer::SkinnedMeshDrawItem> g_shadowDrawItems;
 }
 
 namespace Renderer
@@ -79,6 +81,19 @@ namespace Renderer
         pipelineDesc.depthWriteEnabled = false;
         g_transparentPipelineHandle = Pipeline::CreateGraphics(pipelineDesc);
 
+        // Shadow copies: same vertex shader (which projects flagged items onto the floor), a
+        // pixel shader that outputs the item tint as a multiplier, multiply blending, and
+        // the once-per-pixel stencil so overlapping triangles do not darken twice.
+        CompiledShader shadowPixelShader = Shader::CompileShader("data/shaders/SkinnedMesh.hlsl", "PSShadowMain", "ps_6_0");
+        OMD_ASSERT(!shadowPixelShader.bytecode.empty(), "Skinned mesh pass shadow pixel shader failed to compile");
+        GraphicsPipelineDesc shadowDesc = pipelineDesc;
+        shadowDesc.pixelShader = &shadowPixelShader;
+        shadowDesc.alphaBlendEnabled = false;
+        shadowDesc.multiplyBlendEnabled = true;
+        shadowDesc.depthWriteEnabled = false;
+        shadowDesc.stencilOncePerPixel = true;
+        g_shadowPipelineHandle = Pipeline::CreateGraphics(shadowDesc);
+
         DirectX::XMFLOAT4X4 identity;
         DirectX::XMStoreFloat4x4(&identity, DirectX::XMMatrixIdentity());
         g_cameraBufferHandle = Buffer::Create(&identity, sizeof(identity));
@@ -93,6 +108,7 @@ namespace Renderer
     {
         g_opaqueDrawItems.clear();
         g_transparentDrawItems.clear();
+        g_shadowDrawItems.clear();
     }
 
     void SkinnedMeshPassDX12::SetDrawItems(const std::vector<SkinnedMeshDrawItem>& items)
@@ -101,13 +117,21 @@ namespace Renderer
         // SetDrawItems's own comment for why.
         g_opaqueDrawItems.clear();
         g_transparentDrawItems.clear();
+        g_shadowDrawItems.clear();
         for (const SkinnedMeshDrawItem& item : items)
         {
-            (item.transparent ? g_transparentDrawItems : g_opaqueDrawItems).push_back(item);
+            if (item.shadow)
+            {
+                g_shadowDrawItems.push_back(item);
+            }
+            else
+            {
+                (item.transparent ? g_transparentDrawItems : g_opaqueDrawItems).push_back(item);
+            }
         }
         Foundation::Log::Write(
-            Foundation::Log::Severity::Info, "Renderer", "Skinned mesh pass: %zu opaque, %zu transparent draw item(s)",
-            g_opaqueDrawItems.size(), g_transparentDrawItems.size());
+            Foundation::Log::Severity::Info, "Renderer", "Skinned mesh pass: %zu opaque, %zu transparent, %zu shadow draw item(s)",
+            g_opaqueDrawItems.size(), g_transparentDrawItems.size(), g_shadowDrawItems.size());
     }
 
     namespace
@@ -179,5 +203,29 @@ namespace Renderer
         cmdList->SetPipelineState(PipelineDX12::GetPSO(g_transparentPipelineHandle));
         cmdList->SetGraphicsRootConstantBufferView(0, BufferDX12::GetResource(g_cameraBufferHandle)->GetGPUVirtualAddress());
         DrawItems(cmdList, g_transparentDrawItems);
+    }
+
+    void SkinnedMeshPassDX12::RenderShadows(const SkinnedMeshRenderDesc& desc)
+    {
+        if (g_shadowDrawItems.empty())
+        {
+            return;
+        }
+
+        Buffer::Update(g_cameraBufferHandle, &desc.viewProjection, sizeof(desc.viewProjection));
+
+        ID3D12GraphicsCommandList* cmdList = DeviceDX12::GetCommandList();
+        ID3D12DescriptorHeap* heaps[] = { TextureDX12::GetHeap() };
+        cmdList->SetDescriptorHeaps(1, heaps);
+        cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+        cmdList->SetGraphicsRootSignature(PipelineDX12::GetRootSignature(g_shadowPipelineHandle));
+        cmdList->SetPipelineState(PipelineDX12::GetPSO(g_shadowPipelineHandle));
+        cmdList->SetGraphicsRootConstantBufferView(0, BufferDX12::GetResource(g_cameraBufferHandle)->GetGPUVirtualAddress());
+        // The stencil test passes where the value is not yet 1 and writes 1 (see
+        // GraphicsPipelineDesc::stencilOncePerPixel).
+        cmdList->OMSetStencilRef(1);
+        DrawItems(cmdList, g_shadowDrawItems);
+        cmdList->OMSetStencilRef(0);
     }
 }

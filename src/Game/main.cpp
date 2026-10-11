@@ -24,7 +24,10 @@
 #include "GroundPlane.h"
 #include "InputBindings.h"
 #include "LocalTestScene.h"
+#include "Hud.h"
+#include "MatchFlow.h"
 #include "MoveTable.h"
+#include "PrototypeConfig.h"
 #include "Projectile.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -37,6 +40,7 @@
 #include <cstdio>
 #include <entt.hpp>
 #include <filesystem>
+#include <functional>
 #include <imgui.h>
 #include <optional>
 #include <string>
@@ -85,6 +89,12 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
             }
         }
     }
+
+#if defined(OMD_PROTOTYPE)
+    // "--hud" alongside --capture keeps the overlay in the captured frames (off by default so
+    // scripted output stays comparable between runs).
+    const bool captureKeepsHud = commandLine != nullptr && std::wstring(commandLine).find(L"--hud") != std::wstring::npos;
+#endif
 
     Engine::PrintDependencyChain();
 
@@ -392,7 +402,14 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
 
     // The stage fighters stand/fight on - real shipped content, not dev-only, so always
     // included below rather than gated behind a checkbox the way the local test scene is.
+#if defined(OMD_PROTOTYPE)
+    const Game::StageDrawItems stageDrawItems = Game::CreateStageDrawItems();
+    std::vector<Renderer::StaticMeshDrawItem> groundPlaneDrawItems = stageDrawItems.floor;
+    groundPlaneDrawItems.insert(groundPlaneDrawItems.end(), stageDrawItems.walls.begin(), stageDrawItems.walls.end());
+    float floorScrollSeconds = 0.0f;
+#else
     std::vector<Renderer::StaticMeshDrawItem> groundPlaneDrawItems{ Game::CreateGroundPlaneDrawItem() };
+#endif
     // One small "grounding" shadow quad per fighter - see FighterShadow.h's own comment for why
     // this is a flat opaque patch, not a real soft shadow. Repositioned every render frame
     // (below) to track each fighter's current X/Z - kept as separate persistent draw items
@@ -412,6 +429,47 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
     // since the underlying GPU buffers/textures were already uploaded once above and this only
     // rebuilds the item lists.
     bool enableCharacter = true;
+#if defined(OMD_PROTOTYPE)
+    // TODO(OM): replace with real shadow rendering (shadow maps or a contact-shadow pass).
+    // Planar projected shadows: each fighter's skinned mesh drawn a second time, flattened onto
+    // the floor (in the vertex shader) along the hardcoded light direction (0.4, -1, 0.3), as a flat
+    // dark. The copies share the originals' vertex data and bone palette, so they follow the
+    // live pose with no extra skinning work.
+    std::vector<Renderer::SkinnedMeshDrawItem> characterShadowItems = characterDrawItems;
+    std::vector<Renderer::SkinnedMeshDrawItem> dummyShadowItems = dummyDrawItems;
+    {
+        // A negative alpha selects SkinnedMesh.hlsl's shadow projection; the rgb is the factor
+        // the floor colour under the shadow is multiplied by (lower = darker shadow).
+        const DirectX::XMFLOAT4 shadowTint = { 0.62f, 0.62f, 0.62f, -1.0f };
+        const Renderer::BufferHandle shadowTintBuffer = Renderer::Buffer::Create(&shadowTint, sizeof(shadowTint));
+        DirectX::XMFLOAT4X4 identity;
+        DirectX::XMStoreFloat4x4(&identity, DirectX::XMMatrixIdentity());
+        for (std::vector<Renderer::SkinnedMeshDrawItem>* items : { &characterShadowItems, &dummyShadowItems })
+        {
+            for (Renderer::SkinnedMeshDrawItem& item : *items)
+            {
+                item.worldBuffer = Renderer::Buffer::Create(&identity, sizeof(identity));
+                item.tintBuffer = shadowTintBuffer;
+                item.shadow = true;
+            }
+        }
+    }
+    // TODO(OM): replace per-fighter tints with real palettes/costumes.
+    {
+        const DirectX::XMFLOAT4 firstTint = { 0.72f, 0.86f, 1.0f, 1.0f };
+        const DirectX::XMFLOAT4 secondTint = { 1.0f, 0.74f, 0.68f, 1.0f };
+        const Renderer::BufferHandle firstTintBuffer = Renderer::Buffer::Create(&firstTint, sizeof(firstTint));
+        const Renderer::BufferHandle secondTintBuffer = Renderer::Buffer::Create(&secondTint, sizeof(secondTint));
+        for (Renderer::SkinnedMeshDrawItem& item : characterDrawItems)
+        {
+            item.tintBuffer = firstTintBuffer;
+        }
+        for (Renderer::SkinnedMeshDrawItem& item : dummyDrawItems)
+        {
+            item.tintBuffer = secondTintBuffer;
+        }
+    }
+#endif
     auto rebuildDrawItems = [&]()
     {
         // Dummy's own draw items are concatenated in unconditionally - real content, like the
@@ -422,15 +480,26 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
             skinnedItems.insert(skinnedItems.end(), characterDrawItems.begin(), characterDrawItems.end());
         }
         skinnedItems.insert(skinnedItems.end(), dummyDrawItems.begin(), dummyDrawItems.end());
+#if defined(OMD_PROTOTYPE)
+        if (enableCharacter)
+        {
+            skinnedItems.insert(skinnedItems.end(), characterShadowItems.begin(), characterShadowItems.end());
+        }
+        skinnedItems.insert(skinnedItems.end(), dummyShadowItems.begin(), dummyShadowItems.end());
+#endif
         Renderer::SkinnedMeshPass::SetDrawItems(skinnedItems);
         std::vector<Renderer::StaticMeshDrawItem> staticItems = groundPlaneDrawItems;
         // Same enableCharacter/unconditional split as the skinned items above - player's shadow
         // follows whether the player mesh itself is shown, dummy's shadow is always there.
+#if !defined(OMD_PROTOTYPE)
         if (enableCharacter)
         {
             staticItems.push_back(playerShadowDrawItem);
         }
+#endif
+#if !defined(OMD_PROTOTYPE)
         staticItems.push_back(dummyShadowDrawItem);
+#endif
 #if defined(OMD_PROTOTYPE)
         staticItems.insert(staticItems.end(), projectileSystem.drawItems.begin(), projectileSystem.drawItems.end());
 #endif
@@ -730,6 +799,62 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
     }
 #endif
 
+#if defined(OMD_PROTOTYPE)
+    // TODO(OM): replace with real match flow and a screen-space HUD (see Hud.h / MatchFlow.h).
+    Game::PrototypeConfig prototype;
+    Game::MatchFlow matchFlow;
+    Game::HudState hudState;
+    float hudDeltaSeconds = 0.0f;
+#ifdef OMD_DEV_TOOLS
+    if (captureRun)
+    {
+        prototype.hud = captureKeepsHud;
+        prototype.matchFlow = false;
+    }
+#endif
+    // Puts both fighters back to a fresh round - same recovery the debug Reset button performs
+    // for the fighters, without touching camera or tooling state.
+    const auto resetRound = [&]()
+    {
+        registry.get<Engine::Transform>(characterEntity) = Engine::Transform{};
+        registry.replace<Game::FighterState>(characterEntity, Game::FighterState{});
+        registry.replace<Game::Health>(
+            characterEntity, Game::Health{ characterDefinition.stats.maxHealth, characterDefinition.stats.maxHealth });
+        registry.get<Engine::Transform>(dummyEntity) = Engine::Transform{ { Game::kDefaultFighterGapX, 0.0f, 0.0f } };
+        registry.replace<Game::FighterState>(dummyEntity, Game::FighterState{});
+        registry.replace<Game::Health>(
+            dummyEntity, Game::Health{ dummyDefinition.stats.maxHealth, dummyDefinition.stats.maxHealth });
+        dummyPunishCountdown = 0;
+        Game::ClearProjectiles(registry, projectileSystem);
+        lastCollisionEvents = Engine::CollisionEvents{};
+    };
+    const std::function<void()> hudUI = [&]()
+    {
+        if (!prototype.hud)
+        {
+            return;
+        }
+        Game::HudInput input;
+        const Game::Health& first = registry.get<Game::Health>(characterEntity);
+        const Game::Health& second = registry.get<Game::Health>(dummyEntity);
+        input.health[0] = first.current;
+        input.maxHealth[0] = first.max;
+        input.health[1] = second.current;
+        input.maxHealth[1] = second.max;
+        input.name[0] = "PLAYER 1";
+        input.name[1] = "PLAYER 2";
+        if (prototype.matchFlow && matchFlow.BannerVisible())
+        {
+            input.bannerVisible = true;
+            input.bannerAlpha = matchFlow.BannerAlpha();
+            input.bannerSubtitle = matchFlow.WinnerSide() == 0 ? "PLAYER 1 WINS" : "PLAYER 2 WINS";
+        }
+        Game::DrawHud(hudState, input, hudDeltaSeconds);
+    };
+#else
+    const std::function<void()> hudUI;
+#endif
+
     while (Foundation::PumpMessages())
     {
         const auto now = std::chrono::steady_clock::now();
@@ -822,7 +947,36 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
         const float aspectRatio = static_cast<float>(Renderer::Device::GetWidth()) / static_cast<float>(Renderer::Device::GetHeight());
         const DirectX::XMFLOAT4X4 viewProjection = Engine::ComputeViewProjection(camera, aspectRatio);
 
+#if defined(OMD_PROTOTYPE)
+        float simDeltaSeconds = deltaSeconds;
+        hudDeltaSeconds = deltaSeconds;
+        if (prototype.matchFlow)
+        {
+            int loserSide = -1;
+            if (registry.get<Game::FighterState>(characterEntity).currentState == "KO")
+            {
+                loserSide = 0;
+            }
+            else if (registry.get<Game::FighterState>(dummyEntity).currentState == "KO")
+            {
+                loserSide = 1;
+            }
+            if (matchFlow.Update(deltaSeconds, loserSide))
+            {
+                resetRound();
+            }
+            simDeltaSeconds *= matchFlow.TimeScale();
+        }
+        else
+        {
+            matchFlow.Reset();
+        }
+        floorScrollSeconds += deltaSeconds;
+        Game::UpdateStageScroll(stageDrawItems, floorScrollSeconds);
+        simClock.BeginFrame(simDeltaSeconds);
+#else
         simClock.BeginFrame(deltaSeconds);
+#endif
         while (simClock.TryConsumeTick())
         {
             // Facing - snap (not interpolated), computed once per tick from last tick's settled
@@ -1044,7 +1198,11 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
             // the moment currentState leaves "KO". Verified via a scripted repeated-punch capture
             // that this fires exactly once per knockout and resumes normal hit processing right
             // after (health ticking back down from 100 on the next landed hit, not stuck).
-            if (dummyUndying)
+            if (dummyUndying
+#if defined(OMD_PROTOTYPE)
+                && !prototype.matchFlow
+#endif
+            )
             {
                 Game::FighterState& dummyState = registry.get<Game::FighterState>(dummyEntity);
                 constexpr uint32_t kUndyingReviveHoldFrames = 30; // ~0.5s past the drop settling - a beat to read the KO, eyeball-tuned.
@@ -1160,7 +1318,8 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
         // Transform/ClipPlayback/draw item/facing correction. advanceManually is player-only
         // (see manualClipOverride's own declaration) - false for the dummy, whose
         // playbackTimeSeconds is always frame-count-driven by UpdateFighterState instead.
-        auto updateFighterRender = [&](entt::entity entity, float facingCorrectionRadians, float groundingOffsetY, bool advanceManually)
+        auto updateFighterRender = [&](entt::entity entity, float facingCorrectionRadians, float groundingOffsetY, bool advanceManually,
+                                       Renderer::SkinnedMeshDrawItem* shadowItem = nullptr)
         {
             if (characterSkin == nullptr || characterModel.clips.empty() || !registry.all_of<Engine::SkinnedRenderable>(entity))
             {
@@ -1191,6 +1350,14 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
                 DirectX::XMFLOAT4X4 worldForGpu;
                 DirectX::XMStoreFloat4x4(&worldForGpu, DirectX::XMMatrixTranspose(worldTransform));
                 Renderer::Buffer::Update(drawItem.worldBuffer, &worldForGpu, sizeof(worldForGpu));
+#if defined(OMD_PROTOTYPE)
+                if (shadowItem != nullptr)
+                {
+                    // The shadow copy uses the fighter's own world matrix; SkinnedMesh.hlsl's
+                    // flat shadow mode does the projection onto the floor.
+                    Renderer::Buffer::Update(shadowItem->worldBuffer, &worldForGpu, sizeof(worldForGpu));
+                }
+#endif
             }
 
             Engine::Animator& animator = registry.get<Engine::Animator>(entity);
@@ -1235,8 +1402,17 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
             (registry.get<Game::FighterState>(characterEntity).facingRight ? 0.0f : DirectX::XM_PI);
         const float dummyFacingRadians =
             dummyDefinition.facingCorrectionRadians + (registry.get<Game::FighterState>(dummyEntity).facingRight ? 0.0f : DirectX::XM_PI);
+#if defined(OMD_PROTOTYPE)
+        updateFighterRender(
+            characterEntity, playerFacingRadians, characterDefinition.groundingOffsetY, manualClipOverride,
+            characterShadowItems.empty() ? nullptr : &characterShadowItems[0]);
+        updateFighterRender(
+            dummyEntity, dummyFacingRadians, dummyDefinition.groundingOffsetY, /*advanceManually*/ false,
+            dummyShadowItems.empty() ? nullptr : &dummyShadowItems[0]);
+#else
         updateFighterRender(characterEntity, playerFacingRadians, characterDefinition.groundingOffsetY, manualClipOverride);
         updateFighterRender(dummyEntity, dummyFacingRadians, dummyDefinition.groundingOffsetY, /*advanceManually*/ false);
+#endif
 
         // Shadow discs track their fighter's current X/Z every frame and fade with jump
         // height (Y) - see FighterShadow.h's own comment.
@@ -1465,6 +1641,11 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
             // See dummyUndying's own declaration - lets repeated combo testing keep going
             // without a manual Reset after every knockout.
             ImGui::Checkbox("Dummy undying (auto-revive after KO)", &dummyUndying);
+#if defined(OMD_PROTOTYPE)
+            ImGui::SeparatorText("Prototype");
+            ImGui::Checkbox("HUD (health bars / K.O. banner)", &prototype.hud);
+            ImGui::Checkbox("Match flow (K.O. slow-mo + auto reset)", &prototype.matchFlow);
+#endif
 
             // Combined with "Collision debug draw" above (RenderTasks' own toggle) - this alone
             // draws nothing, it just widens WHEN a move's hitbox exists so there's something to
@@ -1903,7 +2084,9 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
 
         if (Renderer::RenderTasks::DoFrame(
                 viewProjection, primaryContentUI, debugSectionUI, extraWindowsUI, captureDebugUIVisible,
-                Engine::FrameCapture::AnnotationText()))
+                // The readout is part of the debug UI in live play (hidden with it); scripted
+                // capture runs always carry it, since their frames have the debug UI off.
+                (captureRun || captureDebugUIVisible) ? Engine::FrameCapture::AnnotationText() : nullptr, hudUI))
         {
             camera = Engine::Camera{};
             enableCameraFollow = true;
@@ -1951,7 +2134,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
             rebuildDrawItems();
         }
 #else
-        Renderer::RenderTasks::DoFrame(viewProjection);
+        Renderer::RenderTasks::DoFrame(viewProjection, {}, {}, {}, true, nullptr, hudUI);
 #endif
 
         // Encode + write any screenshot queued this frame (F9 or a scripted capture). No-op

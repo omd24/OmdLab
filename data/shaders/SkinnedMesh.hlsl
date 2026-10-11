@@ -45,6 +45,7 @@ struct PSInput
     float4 position : SV_POSITION;
     float3 worldNormal : NORMAL;
     float2 uv0 : TEXCOORD0;
+    float3 worldPosition : TEXCOORD1;
 };
 
 PSInput VSMain(VSInput input)
@@ -63,7 +64,25 @@ PSInput VSMain(VSInput input)
 
     float4 skinnedPosition = mul(skin, float4(input.position, 1.0f));
     float4 worldPosition = mul(World, skinnedPosition);
+    if (TintAndAlpha.a < 0.0f)
+    {
+        // Flat shadow mode (see PSMain): project the posed mesh onto the floor plane along the
+        // light direction. Only the part of the mesh above the plane casts - the feet sunk
+        // into the floor must not project (below the plane the projection would run the other
+        // way, in front of the legs). Constants mirror the floor height (kFloorSurfaceY + 0.01)
+        // and PSMain's light direction (0.4, -1, 0.3); the small constant back offset keeps the
+        // shadow from showing in front of the feet.
+        // TODO(OM): remove with a real shadow technique.
+        const float kShadowPlaneY = 0.08f;
+        const float kShadowBackOffsetZ = 0.06f;
+        const float kShadowOffsetX = 0.08f;
+        const float height = max(worldPosition.y - kShadowPlaneY, 0.0f);
+        worldPosition.x += 0.4f * height + kShadowOffsetX;
+        worldPosition.z += 0.3f * height + kShadowBackOffsetZ;
+        worldPosition.y = kShadowPlaneY;
+    }
     output.position = mul(ViewProjection, worldPosition);
+    output.worldPosition = worldPosition.xyz;
 
     // Correct for rotation + uniform scale, same shortcut LitTextured.hlsl already takes for
     // World - no new gap introduced.
@@ -73,8 +92,18 @@ PSInput VSMain(VSInput input)
     return output;
 }
 
+// Shadow copies (negative TintAndAlpha.a, see VSMain) are drawn with a multiply blend: the
+// output is the factor the colour already in the target is multiplied by, so a shadow
+// darkens whatever surface it lands on. A stencil test lets each pixel through once.
+// TODO(OM): remove with a real shadow technique.
+float4 PSShadowMain(PSInput input) : SV_TARGET
+{
+    return float4(TintAndAlpha.rgb, 1.0f);
+}
+
 float4 PSMain(PSInput input) : SV_TARGET
 {
+
     float4 baseColor = BaseColorTexture.Sample(BaseColorSampler, input.uv0);
 
     // Same hardcoded single-light approximation as LitTextured.hlsl - see its own comment for

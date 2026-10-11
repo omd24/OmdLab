@@ -45,5 +45,12 @@ namespace Renderer
         {
             OMD_GFX_CALL(SkinnedMeshPass, RenderTransparent(desc));
         }
+
+        // Draws the items flagged SkinnedMeshDrawItem::shadow. Call after every opaque draw
+        // (they darken what is already in the target) and before transparent content.
+        static void RenderShadows(const SkinnedMeshRenderDesc& desc)
+        {
+            OMD_GFX_CALL(SkinnedMeshPass, RenderShadows(desc));
+        }
     };
 }

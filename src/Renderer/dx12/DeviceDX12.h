@@ -18,7 +18,8 @@ namespace Renderer
 
     // Shared with PipelineDX12, which needs it for a depth-tested PSO's
     // DSVFormat to match the actual depth buffer.
-    constexpr DXGI_FORMAT kDepthBufferFormat = DXGI_FORMAT_D32_FLOAT;
+    // Depth plus an 8-bit stencil plane (cleared every frame alongside depth).
+    constexpr DXGI_FORMAT kDepthBufferFormat = DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
 
     struct DeviceDX12
     {

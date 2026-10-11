@@ -58,14 +58,18 @@ namespace Renderer
             // OMD_DEV_TOOLS comment) - gated together since DebugDrawPass is only ever toggled
             // through the ImGui window below, and ImGui itself has nothing to draw without it.
             DebugDrawPass::Init();
+#endif
+#if defined(OMD_DEV_TOOLS) || defined(OMD_PROTOTYPE)
             ImGuiHelper::Init(window);
 #endif
         }
 
         static void Shutdown()
         {
-#ifdef OMD_DEV_TOOLS
+#if defined(OMD_DEV_TOOLS) || defined(OMD_PROTOTYPE)
             ImGuiHelper::Shutdown();
+#endif
+#ifdef OMD_DEV_TOOLS
             DebugDrawPass::Shutdown();
 #endif
             UIPass::Shutdown();
@@ -127,13 +131,21 @@ namespace Renderer
         // annotationText (dev-tools builds only): a short line drawn top-left on the ImGui
         // foreground draw list, over everything and regardless of showDebugUI - so a captured
         // frame carries its own sim tick / state. Null or empty draws nothing.
+        //
+        // hudUI: optional caller-supplied drawing for the always-visible in-game overlay. Invoked
+        // every frame outside the showDebugUI gate (so hiding the debug windows never hides it)
+        // and outside OMD_DEV_TOOLS (it only needs the ImGui frame, which is also enabled by
+        // OMD_PROTOTYPE). Expected to draw on ImGui's background draw list rather than open
+        // windows, so it never takes input and debug windows draw over it.
         static bool DoFrame(
             const DirectX::XMFLOAT4X4& viewProjection, const std::function<void()>& primaryContentUI = {},
             const std::function<void()>& debugSectionUI = {}, const std::function<void()>& extraWindowsUI = {}, bool showDebugUI = true,
-            const char* annotationText = nullptr)
+            const char* annotationText = nullptr, const std::function<void()>& hudUI = {})
         {
-#ifdef OMD_DEV_TOOLS
+#if defined(OMD_DEV_TOOLS) || defined(OMD_PROTOTYPE)
             ImGuiHelper::NewFrame();
+#endif
+#ifdef OMD_DEV_TOOLS
 
             if (annotationText != nullptr && annotationText[0] != '\0')
             {
@@ -204,6 +216,13 @@ namespace Renderer
             }
 #endif
 
+#if defined(OMD_DEV_TOOLS) || defined(OMD_PROTOTYPE)
+            if (hudUI)
+            {
+                hudUI();
+            }
+#endif
+
             Device::BeginFrame();
 #ifdef OMD_DEV_TOOLS
             if (enableBackgroundPass)
@@ -240,6 +259,9 @@ namespace Renderer
             // StaticMeshPass::RenderOpaque/RenderTransparent's own comment.
             StaticMeshPass::RenderOpaque({ viewProjection });
             SkinnedMeshPass::RenderOpaque({ viewProjection });
+            // Shadows darken what the opaque passes drew, so they go between the opaque and
+            // transparent content.
+            SkinnedMeshPass::RenderShadows({ viewProjection });
             StaticMeshPass::RenderTransparent({ viewProjection });
             SkinnedMeshPass::RenderTransparent({ viewProjection });
             // Unconditional, not OMD_DEV_TOOLS-gated - real UI is shipped content once it
@@ -252,6 +274,8 @@ namespace Renderer
             {
                 DebugDrawPass::Render({ viewProjection });
             }
+#endif
+#if defined(OMD_DEV_TOOLS) || defined(OMD_PROTOTYPE)
             ImGuiHelper::Render();
 #endif
             Device::EndFrame();

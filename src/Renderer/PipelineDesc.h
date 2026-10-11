@@ -61,6 +61,18 @@ namespace Renderer
         // transparent draws.
         bool depthWriteEnabled = true;
 
+        // Off by default. On replaces blending with a multiply: the render target colour
+        // already there is multiplied by the shader output colour (dst * src). Used for
+        // darkening whatever is already drawn (shadows) without knowing what colour that is.
+        bool multiplyBlendEnabled = false;
+
+        // Off by default. On makes each pixel accept at most one fragment per frame from draws
+        // using this PSO: the stencil test passes only where the stencil value is not yet 1 and
+        // writes 1 there (the draw must set the stencil reference to 1). Overlapping triangles
+        // of one mesh therefore combine instead of compounding - needed for a multiply or alpha
+        // blended flattened mesh. The stencil plane is cleared every frame.
+        bool stencilOncePerPixel = false;
+
         // Triangle by default - every pass so far draws triangles. DebugDrawPass is the first
         // consumer of Line (wireframe boxes), hence this being caller-configurable at all rather
         // than hardcoded like it was before that pass existed.

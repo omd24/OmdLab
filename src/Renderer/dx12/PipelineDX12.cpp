@@ -162,10 +162,34 @@ namespace Renderer
             rtBlend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
         }
 
+        if (desc.multiplyBlendEnabled)
+        {
+            // dst' = dst * src.rgb
+            rtBlend.BlendEnable = TRUE;
+            rtBlend.SrcBlend = D3D12_BLEND_ZERO;
+            rtBlend.DestBlend = D3D12_BLEND_SRC_COLOR;
+            rtBlend.BlendOp = D3D12_BLEND_OP_ADD;
+            rtBlend.SrcBlendAlpha = D3D12_BLEND_ONE;
+            rtBlend.DestBlendAlpha = D3D12_BLEND_ZERO;
+            rtBlend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+        }
+
         psoDesc.DepthStencilState.DepthEnable = desc.depthTestEnabled ? TRUE : FALSE;
         psoDesc.DepthStencilState.DepthWriteMask = desc.depthWriteEnabled ? D3D12_DEPTH_WRITE_MASK_ALL : D3D12_DEPTH_WRITE_MASK_ZERO;
         psoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
-        psoDesc.DepthStencilState.StencilEnable = FALSE;
+        psoDesc.DepthStencilState.StencilEnable = desc.stencilOncePerPixel ? TRUE : FALSE;
+        if (desc.stencilOncePerPixel)
+        {
+            psoDesc.DepthStencilState.StencilReadMask = 0xFF;
+            psoDesc.DepthStencilState.StencilWriteMask = 0xFF;
+            D3D12_DEPTH_STENCILOP_DESC once = {};
+            once.StencilFunc = D3D12_COMPARISON_FUNC_NOT_EQUAL; // against the reference (1)
+            once.StencilPassOp = D3D12_STENCIL_OP_REPLACE;      // writes the reference
+            once.StencilFailOp = D3D12_STENCIL_OP_KEEP;
+            once.StencilDepthFailOp = D3D12_STENCIL_OP_KEEP;
+            psoDesc.DepthStencilState.FrontFace = once;
+            psoDesc.DepthStencilState.BackFace = once;
+        }
         // A DSVFormat other than UNKNOWN is only valid when depth testing is
         // actually enabled - D3D12 requires DepthEnable == FALSE to pair with
         // DXGI_FORMAT_UNKNOWN specifically.

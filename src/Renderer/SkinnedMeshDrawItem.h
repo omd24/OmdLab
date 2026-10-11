@@ -39,5 +39,10 @@ namespace Renderer
 
         // False (opaque) by default - see StaticMeshDrawItem::transparent's own comment.
         bool transparent = false;
+
+        // True marks a flattened shadow copy: drawn after all opaque content with a multiply
+        // blend, once per pixel (stencil), instead of in the opaque/transparent lists. The
+        // item tint rgb is the factor the covered colour is multiplied by.
+        bool shadow = false;
     };
 }
