@@ -5,6 +5,7 @@
 #include "MoveTable.h"
 #include "Renderer/StaticMeshDrawItem.h"
 
+#include <DirectXMath.h>
 #include <cstdint>
 #include <entt.hpp>
 #include <vector>
@@ -43,6 +44,7 @@ namespace Game
         std::vector<Renderer::StaticMeshDrawItem> drawItems;
         std::vector<entt::entity> slotEntity; // entt::null when the slot is free.
         uint32_t cancelledPairs = 0; // Running count of fireball-vs-fireball cancellations.
+        DirectX::XMFLOAT3 lastClashPosition = { 0.0f, 0.0f, 0.0f }; // Where the latest cancellation happened.
     };
 
     ProjectileSystem CreateProjectileSystem(size_t capacity);

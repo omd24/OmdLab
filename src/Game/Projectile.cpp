@@ -73,7 +73,7 @@ namespace Game
             DirectX::XMStoreFloat4x4(&world, DirectX::XMMatrixTranspose(DirectX::XMMatrixTranslation(0.0f, -100.0f, 0.0f)));
             item.worldBuffer = Renderer::Buffer::Create(&world, sizeof(world));
             item.baseColorTexture = Renderer::Texture::Create(whitePixels, 2, 2);
-            const DirectX::XMFLOAT4 orange = { 1.0f, 0.5f, 0.12f, 1.0f };
+            const DirectX::XMFLOAT4 orange = { 3.0f, 1.7f, 0.6f, 1.0f }; // Over-bright so the core reads hot.
             item.tintBuffer = Renderer::Buffer::Create(&orange, sizeof(orange));
             return item;
         }
@@ -199,6 +199,9 @@ namespace Game
                     {
                         cancelled.push_back(live[i]);
                         cancelled.push_back(live[j]);
+                        const DirectX::XMFLOAT3 pa = registry.get<Engine::Transform>(live[i]).position;
+                        const DirectX::XMFLOAT3 pb = registry.get<Engine::Transform>(live[j]).position;
+                        system.lastClashPosition = { (pa.x + pb.x) * 0.5f, (pa.y + pb.y) * 0.5f, (pa.z + pb.z) * 0.5f };
                     }
                 }
             }

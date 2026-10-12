@@ -33,6 +33,8 @@
 #include "MoveTable.h"
 #include "PrototypeConfig.h"
 #include "Projectile.h"
+#include "Vfx.h"
+#include "Backdrop.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
@@ -112,6 +114,8 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
     // scripted output stays comparable between runs).
     const bool captureKeepsHud = commandLine != nullptr && std::wstring(commandLine).find(L"--hud") != std::wstring::npos;
     const bool captureKeepsJuice = commandLine != nullptr && std::wstring(commandLine).find(L"--juice") != std::wstring::npos;
+    const bool captureKeepsBackdrop = commandLine != nullptr && std::wstring(commandLine).find(L"--backdrop") != std::wstring::npos;
+    const bool captureKeepsVfx = commandLine != nullptr && std::wstring(commandLine).find(L"--vfx") != std::wstring::npos;
 #endif
 
     Engine::PrintDependencyChain();
@@ -446,6 +450,8 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
     Renderer::StaticMeshDrawItem dummyShadowDrawItem = Game::CreateFighterShadowDrawItem();
 #if defined(OMD_PROTOTYPE)
     Game::ProjectileSystem projectileSystem = Game::CreateProjectileSystem(4);
+    Game::VfxSystem vfxSystem = Game::CreateVfxSystem(384);
+    Game::Backdrop backdrop = Game::CreateBackdrop("data/images/Low-Poly Dungeon Wall with Skull Pile.png");
 #endif
 
     // The character (GPU-skinned) and local test scene/ground plane (rigid) are different draw
@@ -531,6 +537,10 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
 #endif
 #if defined(OMD_PROTOTYPE)
         staticItems.insert(staticItems.end(), projectileSystem.drawItems.begin(), projectileSystem.drawItems.end());
+        staticItems.insert(staticItems.end(), backdrop.items.begin(), backdrop.items.end());
+        // Last: blended items draw in list order, so effects land over the other translucents.
+        staticItems.insert(staticItems.end(), vfxSystem.poolItems.begin(), vfxSystem.poolItems.end());
+        staticItems.insert(staticItems.end(), vfxSystem.drawItems.begin(), vfxSystem.drawItems.end());
 #endif
 #ifdef OMD_DEV_TOOLS
         if (enableLocalTestScene)
@@ -839,6 +849,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
     Engine::Audio::LoopId runLoop[2] = { -1, -1 };
     uint32_t whiffHandledInstance[2] = { 0, 0 };
     uint32_t sfxSeenCancelled = 0;
+    uint32_t vfxSeenCancelled = 0;
     bool audioReady = false;
 #ifdef OMD_DEV_TOOLS
     if (captureRun)
@@ -846,6 +857,8 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
         prototype.hud = captureKeepsHud;
         prototype.matchFlow = false;
         prototype.juice = captureKeepsJuice;
+        prototype.vfx = captureKeepsVfx;
+        prototype.backdrop = captureKeepsBackdrop;
         prototype.sfx = false;
         prototype.music = false;
     }
@@ -869,6 +882,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
         registry.replace<Game::Health>(dummyEntity, Game::Health{ secondMaxHealth, secondMaxHealth });
         dummyPunishCountdown = 0;
         Game::ClearProjectiles(registry, projectileSystem);
+        Game::ClearVfx(vfxSystem);
         lastCollisionEvents = Engine::CollisionEvents{};
         sfxCues.OnRoundReset();
     };
@@ -1565,7 +1579,34 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
             // behind a dragged slider - intentional, an honest side effect of ticks/frames being
             // decoupled, not a bug).
 #if defined(OMD_PROTOTYPE)
-            if (prototype.juice || (prototype.sfx && audioReady))
+            if (prototype.vfx)
+            {
+                // Dust as a fighter leaves / returns to the ground.
+                const entt::entity vfxFighters[2] = { characterEntity, dummyEntity };
+                for (int side = 0; side < 2; ++side)
+                {
+                    const Game::FighterState& state = registry.get<Game::FighterState>(vfxFighters[side]);
+                    const bool airborne = state.IsAirborne();
+                    if (airborne == beforeFighters[side].airborne)
+                    {
+                        continue;
+                    }
+                    Game::VfxEvent event;
+                    event.type = airborne ? Game::VfxType::JumpOff : Game::VfxType::Landing;
+                    const DirectX::XMFLOAT3 feet = registry.get<Engine::Transform>(vfxFighters[side]).position;
+                    event.position = { feet.x, Game::kFloorSurfaceY + 0.03f, feet.z };
+                    Game::PushVfxEvent(vfxSystem, event);
+                }
+                if (projectileSystem.cancelledPairs != vfxSeenCancelled)
+                {
+                    vfxSeenCancelled = projectileSystem.cancelledPairs;
+                    Game::VfxEvent event;
+                    event.type = Game::VfxType::FireballClash;
+                    event.position = projectileSystem.lastClashPosition;
+                    Game::PushVfxEvent(vfxSystem, event);
+                }
+            }
+            if (prototype.juice || prototype.vfx || (prototype.sfx && audioReady))
             {
                 const entt::entity fighters[2] = { characterEntity, dummyEntity };
                 for (int side = 0; side < 2; ++side)
@@ -1649,6 +1690,30 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
                     if (prototype.sfx && audioReady)
                     {
                         sfxCues.OnHit(beforeFighters[side].health - health, blocked, byFireball, knockout);
+                    }
+                    if (prototype.vfx)
+                    {
+                        Game::VfxEvent event;
+                        event.type = byFireball ? Game::VfxType::FireballImpact
+                                                : (knockout ? Game::VfxType::Knockout
+                                                            : (blocked ? Game::VfxType::Block : Game::VfxType::Hit));
+                        const entt::entity attacker = state.lastHitByAttacker;
+                        event.position = Game::ComputeContactPoint(registry, attacker, fighters[side]);
+                        const bool attackerKnown = attacker != entt::null && registry.valid(attacker) && registry.all_of<Engine::Transform>(attacker);
+                        const float attackerX = attackerKnown ? registry.get<Engine::Transform>(attacker).position.x
+                                                              : registry.get<Engine::Transform>(fighters[1 - side]).position.x;
+                        event.direction = { registry.get<Engine::Transform>(fighters[side]).position.x >= attackerX ? 1.0f : -1.0f, 0.0f, 0.0f };
+                        event.intensity = std::clamp(static_cast<float>(beforeFighters[side].health - health) / 25.0f, 0.15f, 1.0f);
+                        Game::PushVfxEvent(vfxSystem, event);
+                        if (knockout)
+                        {
+                            Game::VfxEvent pool = event;
+                            pool.type = Game::VfxType::BloodPool;
+                            pool.position = registry.get<Engine::Transform>(fighters[side]).position;
+                            pool.subject = fighters[side];
+                            pool.landedFrame = (side == 0 ? characterDefinition : dummyDefinition).koDropEndFrame;
+                            Game::PushVfxEvent(vfxSystem, pool);
+                        }
                     }
                     if (!prototype.juice)
                     {
@@ -1819,6 +1884,18 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
         }
 #if defined(OMD_PROTOTYPE)
         Game::UpdateProjectileRender(registry, projectileSystem);
+        if (prototype.vfx)
+        {
+            Game::UpdateBackdropFire(backdrop, vfxSystem, camera.position.x, deltaSeconds);
+            Game::UpdateVfx(registry, vfxSystem, shakenCamera, deltaSeconds);
+            Game::UpdateVfxPools(registry, vfxSystem, deltaSeconds);
+        }
+        else
+        {
+            Game::ClearVfx(vfxSystem);
+        }
+        Game::UpdateVfxRender(vfxSystem, shakenCamera);
+        Game::SetBackdropVisible(backdrop, prototype.backdrop);
 #endif
 
 #ifdef OMD_DEV_TOOLS
@@ -2046,6 +2123,8 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
             ImGui::Checkbox("HUD (health bars / K.O. banner)", &prototype.hud);
             ImGui::Checkbox("Match flow (K.O. slow-mo + auto reset)", &prototype.matchFlow);
             ImGui::Checkbox("Juice (hit flash, camera shake)", &prototype.juice);
+            ImGui::Checkbox("VFX (sparks, dust, fireball glow)", &prototype.vfx);
+            ImGui::Checkbox("Backdrop (dungeon wall, torches)", &prototype.backdrop);
             ImGui::Checkbox("SFX", &prototype.sfx);
             ImGui::SameLine();
             ImGui::Checkbox("Music", &prototype.music);
@@ -2607,6 +2686,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
             dummyPunishCountdown = 0;
 #if defined(OMD_PROTOTYPE)
             Game::ClearProjectiles(registry, projectileSystem);
+            Game::ClearVfx(vfxSystem);
             sfxCues.OnRoundReset();
 #endif
             // Also drop the last-resolved hit(s) - UpdateFighterState reacts to lastCollisionEvents

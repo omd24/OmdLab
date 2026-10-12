@@ -16,9 +16,8 @@
 
 namespace
 {
-    Renderer::TextureHandle LoadTexture(const std::string& directory, const std::string& fileName)
+    Renderer::TextureHandle LoadTextureFromPath(const std::string& fullPath)
     {
-        const std::string fullPath = directory + "/" + fileName;
         int width = 0;
         int height = 0;
         int sourceChannels = 0;
@@ -32,6 +31,11 @@ namespace
         Renderer::TextureHandle handle = Renderer::Texture::Create(pixels, static_cast<unsigned int>(width), static_cast<unsigned int>(height));
         stbi_image_free(pixels);
         return handle;
+    }
+
+    Renderer::TextureHandle LoadTexture(const std::string& directory, const std::string& fileName)
+    {
+        return LoadTextureFromPath(directory + "/" + fileName);
     }
 
     // Shared fallback for any material with no base color texture (including a source asset
@@ -91,6 +95,11 @@ namespace
 
 namespace Engine
 {
+    Renderer::TextureHandle LoadTextureFile(const std::string& path)
+    {
+        return LoadTextureFromPath(path);
+    }
+
     std::vector<Renderer::StaticMeshDrawItem> CreateStaticMeshDrawItems(
         const Asset::Model& model, const std::string& textureDirectory, const DirectX::XMMATRIX& rootTransform)
     {

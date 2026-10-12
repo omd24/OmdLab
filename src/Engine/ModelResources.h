@@ -14,6 +14,10 @@ namespace Asset
 
 namespace Engine
 {
+    // Decodes one image file (PNG/JPG/...) and uploads it as a texture. An invalid handle (and a
+    // logged warning) when the file is missing or undecodable.
+    Renderer::TextureHandle LoadTextureFile(const std::string& path);
+
     // The connective resource layer: turns one imported Asset::Model into ready-to-draw
     // Renderer::StaticMeshDrawItems. Uploads each primitive's vertex/index data as GPU buffers,
     // decodes and uploads each referenced base-color texture once (deduplicated by material,
