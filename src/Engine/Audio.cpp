@@ -203,6 +203,23 @@ namespace Engine
             voice->startOrder = ++s_order;
         }
 
+        void StopGroup(int group, int fadeMilliseconds)
+        {
+            if (!g_ready || group == 0)
+            {
+                return;
+            }
+            for (size_t i = 0; i < kVoiceCount; ++i)
+            {
+                Voice& voice = g_voices[i];
+                if (voice.inUse && voice.group == group && ma_sound_is_playing(&voice.sound) && !ma_sound_at_end(&voice.sound))
+                {
+                    ma_sound_stop_with_fade_in_milliseconds(&voice.sound, static_cast<ma_uint64>(fadeMilliseconds));
+                    voice.group = 0;
+                }
+            }
+        }
+
         LoopId StartLoop(SoundId sound, float volume)
         {
             if (!g_ready || sound < 0 || static_cast<size_t>(sound) >= g_paths.size())

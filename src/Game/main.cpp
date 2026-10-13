@@ -451,7 +451,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
 #if defined(OMD_PROTOTYPE)
     Game::ProjectileSystem projectileSystem = Game::CreateProjectileSystem(4);
     Game::VfxSystem vfxSystem = Game::CreateVfxSystem(384);
-    Game::Backdrop backdrop = Game::CreateBackdrop("data/images/Low-Poly Dungeon Wall with Skull Pile.png");
+    Game::Backdrop backdrop = Game::CreateBackdrop("data/images/Seamless Low-Poly Dungeon Tile.png");
 #endif
 
     // The character (GPU-skinned) and local test scene/ground plane (rigid) are different draw
@@ -2153,6 +2153,17 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
                 ImGui::Checkbox("Attack swing/voice: after K.O.", &sfxCues.categories.attackAfterKo);
                 ImGui::Checkbox("Hit sound", &sfxCues.categories.hit);
                 ImGui::Checkbox("Whiff swing sound", &sfxCues.categories.whiff);
+                ImGui::Checkbox("Recorded set (hit/whiff/voice/K.O.)", &sfxCues.categories.own);
+                ImGui::SameLine();
+                ImGui::Checkbox("Attack voice", &sfxCues.categories.voice);
+                ImGui::SliderFloat("Recorded hit level", &sfxCues.categories.ownHitVolume, 0.0f, 3.0f);
+                ImGui::SliderFloat("Recorded whiff level", &sfxCues.categories.ownWhiffVolume, 0.0f, 3.0f);
+                ImGui::SliderFloat("Recorded voice level", &sfxCues.categories.ownVoiceVolume, 0.0f, 3.0f);
+                ImGui::SliderFloat("Recorded K.O. level", &sfxCues.categories.ownKoVolume, 0.0f, 3.0f);
+                ImGui::SliderFloat("Run roar level", &sfxCues.categories.runRoarVolume, 0.0f, 3.0f);
+                ImGui::SliderFloat("Run loop level", &sfxCues.categories.runLoopVolume, 0.0f, 1.0f);
+                ImGui::SliderFloat("Older layer chance", &sfxCues.categories.legacyChance, 0.0f, 1.0f);
+                ImGui::SliderFloat("Older layer level", &sfxCues.categories.legacyVolume, 0.0f, 1.0f);
                 ImGui::SliderFloat("Hit level", &sfxCues.categories.hitVolume, 0.0f, 3.0f);
                 ImGui::SliderFloat("Whiff level", &sfxCues.categories.whiffVolume, 0.0f, 3.0f);
                 ImGui::SliderFloat("K.O. cry level", &sfxCues.categories.koVolume, 0.0f, 2.0f);

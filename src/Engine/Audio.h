@@ -26,6 +26,9 @@ namespace Engine
         // starts, so rapid repeats (a combo of hits) replace each other instead of piling up.
         void Play(SoundId sound, float volume = 1.0f, float pitch = 1.0f, int group = 0);
 
+        // Fades out and stops every sound currently playing in `group` (a non-zero group).
+        void StopGroup(int group, int fadeMilliseconds);
+
         // Loops until stopped; replaces any music already playing.
         void PlayMusic(const char* name, float volume);
         void StopMusic();

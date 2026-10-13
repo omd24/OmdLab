@@ -15,7 +15,7 @@ namespace Game
         bool vfx = true;       // Hit sparks, dust puffs, fireball glow and trail.
         bool sfx = true;       // Attack, fireball, movement and K.O. sounds (per-family switches in SfxCues).
         bool music = true;     // Looping music track.
-        float sfxVolume = 1.05f;
+        float sfxVolume = 0.08f;
         float musicVolume = 0.10f;
     };
 }

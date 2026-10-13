@@ -51,6 +51,22 @@ namespace Game
             float whiffVolume = 0.25f;   // Level of the whiff swing (before the overall SFX volume).
             float koVolume = 0.4f;       // Level of the K.O. cry relative to its original (loud) level.
             float hitVolume = 0.4f;     // Level of a regular hit (13+ damage plays it 25% louder).
+
+            // The recorded set (hit_own_*, whiff_own_*, voice_*, ko_own). Levels are relative to
+            // the file level; the files themselves are loudness-matched per family.
+            bool own = true;             // Use the recorded set for hits, whiffs, attack voice and K.O.
+            bool voice = true;           // The attacker's voice on attacks.
+            float ownHitVolume = 0.9f;
+            float ownWhiffVolume = 0.65f;
+            float ownVoiceVolume = 0.8f;
+            float ownKoVolume = 0.85f;
+            // The older recordings stay as a quiet extra layer now and then (0 chance = off).
+            float legacyChance = 0.35f;
+            float legacyVolume = 0.3f;
+
+            // Running: the roar when a run starts and the footstep loop.
+            float runRoarVolume = 0.75f;
+            float runLoopVolume = 0.22f;
         };
         Categories categories;
 
@@ -70,6 +86,18 @@ namespace Game
             LoadSet(m_block, { "block_1", "block_2" });
             LoadSet(m_crushLight, { "crush_light_1", "crush_light_2" });
             LoadSet(m_crushHeavy, { "crush_heavy_1", "crush_heavy_2", "crush_heavy_ai" });
+            LoadSet(m_hitOwn, { "hit_own_1", "hit_own_2", "hit_own_3" });
+            LoadSet(m_whiffOwn, { "whiff_own_1", "whiff_own_2" });
+            LoadSet(m_voiceMedium, { "voice_medium_1" });
+            LoadSet(m_voiceHeavy, { "voice_heavy_1", "voice_heavy_2" });
+            m_voiceFireball = Engine::Audio::Load("voice_fireball");
+            m_koOwn = Engine::Audio::Load("ko_own");
+            // The recorded sets always vary (never the same variant twice in a row), whatever
+            // the global randomisation switch says.
+            for (Set* set : { &m_hitOwn, &m_whiffOwn, &m_voiceMedium, &m_voiceHeavy })
+            {
+                set->randomAlways = true;
+            }
             m_fireballCast = Engine::Audio::Load("fireball_cast");
             m_fireballImpact = Engine::Audio::Load("fireball_impact");
             m_fireballCancel = Engine::Audio::Load("fireball_cancel");
@@ -80,7 +108,8 @@ namespace Game
             m_land = Engine::Audio::Load("land");
             m_run = Engine::Audio::Load("run_loop");
             m_fireLoopSound = Engine::Audio::Load("fireball_loop");
-            LoadSet(m_roar, { "run_roar" });
+            LoadSet(m_roar, { "run_roar", "run_roar2" });
+            m_roar.randomAlways = true;
             m_hitLight.randomAlways = true; // hits vary between the five recordings
             // The heavy sets (used by the combo enders: the third punch / kick of a string, and any
             // hit of 13+ damage) keep their first variant whatever the global one is.
@@ -96,6 +125,7 @@ namespace Game
         {
             const bool heavy = moveId.find("heavy") != std::string::npos;
             const bool fireball = moveId == "fireball";
+            PlayAttackVoice(moveId, heavy, fireball, continuation);
             if (fireball ? !categories.fireball
                          : !(categories.attackAlways || (categories.attackAfterKo && m_afterKnockout)))
             {
@@ -159,7 +189,11 @@ namespace Game
                 // Lower than before, never ducked by what came just before it - and what follows
                 // it (the next round's first attacks) is held down for a couple of seconds.
                 // No boom: just the cry, never ducked by what came before it.
-                if (categories.koCry)
+                if (categories.own && m_koOwn != Engine::Audio::kInvalidSound)
+                {
+                    Out(m_koOwn, categories.ownKoVolume, 1.0f, kGroupKo, false);
+                }
+                else if (categories.koCry)
                 {
                     Out(m_koCry, kLevelVoice * 1.75f * categories.koVolume, 1.0f, kGroupVoice, false);
                 }
@@ -178,7 +212,15 @@ namespace Game
                 return;
             }
             // A regular hit: one very soft thud (nothing for a block, which just pushes back).
-            if (categories.hit && !blocked)
+            if (categories.own && categories.hit && !blocked && m_hitOwn.count > 0)
+            {
+                PlayRandom(m_hitOwn, categories.ownHitVolume * (damage >= 13 ? 1.15f : 1.0f), 1.0f, kGroupImpact, false);
+                if (Next() < categories.legacyChance)
+                {
+                    PlayRandom(m_hitLight, categories.legacyVolume * categories.hitVolume, 1.0f, kGroupLegacy);
+                }
+            }
+            else if (categories.hit && !blocked)
             {
                 PlayRandom(m_hitLight, categories.hitVolume * (damage >= 13 ? 1.25f : 1.0f), 1.0f, kGroupImpact);
             }
@@ -192,6 +234,15 @@ namespace Game
                 return;
             }
             m_lastWhiff = m_time;
+            if (categories.own && m_whiffOwn.count > 0)
+            {
+                PlayRandom(m_whiffOwn, categories.ownWhiffVolume, 1.0f, kGroupSwing, false);
+                if (Next() < categories.legacyChance)
+                {
+                    PlayRandom(m_whiff, categories.legacyVolume * categories.whiffVolume, 1.0f, kGroupLegacy);
+                }
+                return;
+            }
             BeginEvent();
             PlayRandom(m_whiff, categories.whiffVolume, 1.0f, kGroupSwing);
         }
@@ -239,7 +290,7 @@ namespace Game
         }
 
         // A footstep loop while a fighter runs; the handle is the caller's to hold.
-        Engine::Audio::LoopId StartRun() { return categories.run ? Engine::Audio::StartLoop(m_run, 0.08f * m_scale) : -1; }
+        Engine::Audio::LoopId StartRun() { return categories.run ? Engine::Audio::StartLoop(m_run, categories.runLoopVolume * m_scale) : -1; }
         void StopRun(Engine::Audio::LoopId loop) { Engine::Audio::StopLoop(loop); }
 
         // Live switches for judging cues: random picks on/off, and which variant of every set
@@ -261,7 +312,7 @@ namespace Game
             }
             m_lastRoarSeconds = nowSeconds;
             BeginEvent();
-            PlayRandom(m_roar, kLevelVoice * 1.1f, 1.0f, kGroupVoice);
+            PlayRandom(m_roar, categories.runRoarVolume, 1.0f, kGroupRun, false);
         }
 
     public:
@@ -271,6 +322,7 @@ namespace Game
         // After a knockout the exchange is over: every effect is silent until the round restarts.
         void OnRoundReset()
         {
+            Engine::Audio::StopGroup(kGroupKo, 300); // The K.O. sound ends with the round.
             m_afterKnockout = false;
             m_recent = 0.0f;
         }
@@ -322,12 +374,16 @@ namespace Game
         static constexpr int kGroupImpact = 1;
         static constexpr int kGroupVoice = 2;
         static constexpr int kGroupSwing = 3;
+        static constexpr int kGroupKo = 4;
+        static constexpr int kGroupLegacy = 5;
+        static constexpr int kGroupRun = 6;
 
         struct Set
         {
             Engine::Audio::SoundId ids[8];
             const char* names[8];
             int count = 0;
+            int last = -1; // Variant played last, to avoid an immediate repeat.
             int pinned = -1; // >= 0: the variant used in deterministic mode regardless of the global one.
             bool randomAlways = false; // Picks a random variant even when random SFX is off.
         };
@@ -366,7 +422,7 @@ namespace Game
             return Next() < p;
         }
 
-        void PlayRandom(const Set& set, float volume, float basePitch, int group = 0)
+        void PlayRandom(Set& set, float volume, float basePitch, int group = 0, bool duck = true)
         {
             if (set.count == 0)
             {
@@ -377,6 +433,12 @@ namespace Game
             if (m_randomize || set.randomAlways)
             {
                 index = static_cast<int>(Next() * static_cast<float>(set.count)) % set.count;
+                if (set.count > 1 && index == set.last)
+                {
+                    // Never the same variant twice in a row.
+                    index = (index + 1 + static_cast<int>(Next() * static_cast<float>(set.count - 1))) % set.count;
+                }
+                set.last = index;
                 pitch = basePitch * (0.94f + 0.12f * Next());
             }
             else
@@ -385,10 +447,40 @@ namespace Game
                 index = wanted < set.count ? wanted : set.count - 1;
             }
             Foundation::Log::Write(Foundation::Log::Severity::Info, "Sfx", "%s vol=%.2f", set.names[index], volume);
-            Out(set.ids[index], volume, pitch, group);
+            Out(set.ids[index], volume, pitch, group, duck);
+        }
+
+        // The attacker's voice: a medium or heavy recording by the move (the higher-pitched light
+        // one, voice_light_1, is not used), the fireball throw by itself. Middle links of a string stay quiet and voices keep a little
+        // distance from each other so a flurry does not become a wall of shouting.
+        void PlayAttackVoice(const std::string& moveId, bool heavy, bool fireball, bool continuation)
+        {
+            if (!categories.own || !categories.voice)
+            {
+                return;
+            }
+            if (fireball)
+            {
+                if (categories.fireball && m_voiceFireball != Engine::Audio::kInvalidSound)
+                {
+                    Out(m_voiceFireball, categories.ownVoiceVolume, 1.0f, kGroupVoice, false);
+                }
+                return;
+            }
+            if ((continuation && !heavy) || m_time - m_lastVoice < 0.4f)
+            {
+                return;
+            }
+            m_lastVoice = m_time;
+            PlayRandom(heavy ? m_voiceHeavy : m_voiceMedium, categories.ownVoiceVolume * (heavy ? 1.1f : 1.0f), 1.0f, kGroupVoice,
+                       false);
         }
 
         Set m_gruntLight, m_gruntHeavy, m_swish, m_whooshHeavy, m_hitLight, m_hitHeavy, m_block, m_crushLight, m_crushHeavy, m_roar, m_whiff;
+        Set m_hitOwn, m_whiffOwn, m_voiceMedium, m_voiceHeavy;
+        float m_lastVoice = -10.0f;
+        Engine::Audio::SoundId m_voiceFireball = Engine::Audio::kInvalidSound;
+        Engine::Audio::SoundId m_koOwn = Engine::Audio::kInvalidSound;
         float m_lastWhiff = -10.0f;
         float m_lastRoarSeconds = -100.0f;
         bool m_randomize = RANDOM_SFX != 0;

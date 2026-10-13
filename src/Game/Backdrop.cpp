@@ -17,15 +17,15 @@ namespace Game
 {
     namespace
     {
-        // The picture is 1915 x 821; the wall stands this tall so the fighters read at a
+        // The picture is 1916 x 821; the wall stands this tall so the fighters read at a
         // sensible size against it and its top edge sits above the default view.
         constexpr float kHeightUnits = 4.8f;
-        constexpr float kAspect = 1915.0f / 821.0f;
+        constexpr float kAspect = 1916.0f / 821.0f;
         constexpr int kHalfTiles = 2; // Tiles on each side of the centre one.
 
         // The two wall torches, in picture coordinates (u across, v down) of the flame's base.
-        constexpr float kTorchU[2] = { 0.375f, 0.643f };
-        constexpr float kTorchV = 0.25f;
+        constexpr float kTorchU[2] = { 0.404f, 0.603f };
+        constexpr float kTorchV = 0.26f;
 
         float Hash01(float x)
         {
