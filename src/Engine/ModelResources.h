@@ -18,6 +18,10 @@ namespace Engine
     // logged warning) when the file is missing or undecodable.
     Renderer::TextureHandle LoadTextureFile(const std::string& path);
 
+    // Decodes one image file to tightly packed 8-bit RGBA on the CPU. False (and a logged
+    // warning) when the file is missing or undecodable.
+    bool LoadImageRgba(const std::string& path, unsigned int& width, unsigned int& height, std::vector<unsigned char>& rgba);
+
     // The connective resource layer: turns one imported Asset::Model into ready-to-draw
     // Renderer::StaticMeshDrawItems. Uploads each primitive's vertex/index data as GPU buffers,
     // decodes and uploads each referenced base-color texture once (deduplicated by material,

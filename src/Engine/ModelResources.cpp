@@ -100,6 +100,24 @@ namespace Engine
         return LoadTextureFromPath(path);
     }
 
+    bool LoadImageRgba(const std::string& path, unsigned int& width, unsigned int& height, std::vector<unsigned char>& rgba)
+    {
+        int w = 0;
+        int h = 0;
+        int channels = 0;
+        unsigned char* pixels = stbi_load(path.c_str(), &w, &h, &channels, 4);
+        if (pixels == nullptr)
+        {
+            Foundation::Log::Write(Foundation::Log::Severity::Warning, "Engine", "Failed to decode image '%s'", path.c_str());
+            return false;
+        }
+        width = static_cast<unsigned int>(w);
+        height = static_cast<unsigned int>(h);
+        rgba.assign(pixels, pixels + static_cast<size_t>(w) * static_cast<size_t>(h) * 4);
+        stbi_image_free(pixels);
+        return true;
+    }
+
     std::vector<Renderer::StaticMeshDrawItem> CreateStaticMeshDrawItems(
         const Asset::Model& model, const std::string& textureDirectory, const DirectX::XMMATRIX& rootTransform)
     {

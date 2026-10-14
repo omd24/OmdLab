@@ -92,6 +92,7 @@ namespace Game
             LoadSet(m_voiceHeavy, { "voice_heavy_1", "voice_heavy_2" });
             m_voiceFireball = Engine::Audio::Load("voice_fireball");
             m_koOwn = Engine::Audio::Load("ko_own");
+            m_fightOwn = Engine::Audio::Load("fight_own");
             // The recorded sets always vary (never the same variant twice in a row), whatever
             // the global randomisation switch says.
             for (Set* set : { &m_hitOwn, &m_whiffOwn, &m_voiceMedium, &m_voiceHeavy })
@@ -245,6 +246,15 @@ namespace Game
             }
             BeginEvent();
             PlayRandom(m_whiff, categories.whiffVolume, 1.0f, kGroupSwing);
+        }
+
+        // The round-start announcement ("fight").
+        void OnFight()
+        {
+            if (categories.own && m_fightOwn != Engine::Audio::kInvalidSound)
+            {
+                Out(m_fightOwn, categories.ownVoiceVolume * 1.1f, 1.0f, kGroupVoice, false);
+            }
         }
 
         void OnFireballCancelled()
@@ -481,6 +491,7 @@ namespace Game
         float m_lastVoice = -10.0f;
         Engine::Audio::SoundId m_voiceFireball = Engine::Audio::kInvalidSound;
         Engine::Audio::SoundId m_koOwn = Engine::Audio::kInvalidSound;
+        Engine::Audio::SoundId m_fightOwn = Engine::Audio::kInvalidSound;
         float m_lastWhiff = -10.0f;
         float m_lastRoarSeconds = -100.0f;
         bool m_randomize = RANDOM_SFX != 0;

@@ -21,8 +21,9 @@ namespace Game
         Hit,            // Contact sparks, flash and dust. intensity 0..1.
         Block,          // Cooler, smaller sparks.
         Knockout,       // Finishing blow: everything bigger.
-        Landing,        // Dust either side of the feet.
-        JumpOff,        // Small dust at the feet.
+        Landing,        // Green water thrown up either side of the feet.
+        JumpOff,        // Splash at the feet as a fighter leaves the ground.
+        Step,           // A small splash under a running fighter's foot.
         FireballImpact, // Fireball connecting.
         FireballClash,  // Two fireballs cancelling.
         BloodPool,      // A pool that grows under a knocked-out fighter. `subject` is that fighter.

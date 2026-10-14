@@ -35,6 +35,8 @@
 #include "Projectile.h"
 #include "Vfx.h"
 #include "Backdrop.h"
+#include "MainMenu.h"
+#include "Splash.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
@@ -114,6 +116,12 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
     // scripted output stays comparable between runs).
     const bool captureKeepsHud = commandLine != nullptr && std::wstring(commandLine).find(L"--hud") != std::wstring::npos;
     const bool captureKeepsJuice = commandLine != nullptr && std::wstring(commandLine).find(L"--juice") != std::wstring::npos;
+    // Launch modes. Default: straight into the game with the debug tooling, as usual. --menu:
+    // the main menu first, then the usual game. --demo: boot statement, main menu, and "Play"
+    // starts the AI simulation with the debug UI hidden (for recording footage).
+    bool demoMode = commandLine != nullptr && std::wstring(commandLine).find(L"--demo") != std::wstring::npos;
+    const bool menuRequested = demoMode || (commandLine != nullptr && std::wstring(commandLine).find(L"--menu") != std::wstring::npos);
+    const bool scriptedRun = commandLine != nullptr && std::wstring(commandLine).find(L"--capture") != std::wstring::npos;
     const bool captureKeepsBackdrop = commandLine != nullptr && std::wstring(commandLine).find(L"--backdrop") != std::wstring::npos;
     const bool captureKeepsVfx = commandLine != nullptr && std::wstring(commandLine).find(L"--vfx") != std::wstring::npos;
 #endif
@@ -127,7 +135,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
     constexpr unsigned int windowWidth = 1280;
     constexpr unsigned int windowHeight = 720;
 
-    HWND window = Foundation::CreateGameWindow("OmdLab", windowWidth, windowHeight);
+    HWND window = Foundation::CreateGameWindow("Fighter Lab", windowWidth, windowHeight);
     if (window == nullptr)
     {
         Foundation::Log::Shutdown();
@@ -452,6 +460,16 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
     Game::ProjectileSystem projectileSystem = Game::CreateProjectileSystem(4);
     Game::VfxSystem vfxSystem = Game::CreateVfxSystem(384);
     Game::Backdrop backdrop = Game::CreateBackdrop("data/images/Seamless Low-Poly Dungeon Tile.png");
+    // The main menu: shown at start (not in scripted runs), over the dark backdrop with only the
+    // torch fire; the fighters, floor and HUD are left out of the draw lists while it is up.
+    bool menuAllowed = menuRequested && !scriptedRun && backdrop.loaded;
+    bool menuActive = menuAllowed;
+    bool restartDemoRequested = false; // Set by the debug window's button; handled at the top of the next frame.
+    Game::Splash splash = Game::CreateSplash();
+    bool splashActive = demoMode && menuAllowed;
+    float splashTime = 0.0f;
+    Game::MainMenuState menuState;
+    bool menuEscWas = true; // Starts "held" so a key held from before does not count as an edge.
 #endif
 
     // The character (GPU-skinned) and local test scene/ground plane (rigid) are different draw
@@ -510,6 +528,18 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
         // Dummy's own draw items are concatenated in unconditionally - real content, like the
         // ground plane below, not gated behind enableCharacter (which stays player-only).
         std::vector<Renderer::SkinnedMeshDrawItem> skinnedItems;
+        if (menuActive)
+        {
+            // Menu: nothing but the dark backdrop and the effects (torch fire).
+            Renderer::SkinnedMeshPass::SetDrawItems(skinnedItems);
+            std::vector<Renderer::StaticMeshDrawItem> menuStatic;
+            menuStatic.insert(menuStatic.end(), backdrop.menuItems.begin(), backdrop.menuItems.end());
+            menuStatic.insert(menuStatic.end(), backdrop.capItems.begin(), backdrop.capItems.end());
+            menuStatic.insert(menuStatic.end(), vfxSystem.drawItems.begin(), vfxSystem.drawItems.end());
+            menuStatic.insert(menuStatic.end(), splash.items.begin(), splash.items.end());
+            Renderer::StaticMeshPass::SetDrawItems(menuStatic);
+            return;
+        }
         if (enableCharacter)
         {
             skinnedItems.insert(skinnedItems.end(), characterDrawItems.begin(), characterDrawItems.end());
@@ -538,6 +568,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
 #if defined(OMD_PROTOTYPE)
         staticItems.insert(staticItems.end(), projectileSystem.drawItems.begin(), projectileSystem.drawItems.end());
         staticItems.insert(staticItems.end(), backdrop.items.begin(), backdrop.items.end());
+        staticItems.insert(staticItems.end(), backdrop.capItems.begin(), backdrop.capItems.end());
         // Last: blended items draw in list order, so effects land over the other translucents.
         staticItems.insert(staticItems.end(), vfxSystem.poolItems.begin(), vfxSystem.poolItems.end());
         staticItems.insert(staticItems.end(), vfxSystem.drawItems.begin(), vfxSystem.drawItems.end());
@@ -720,7 +751,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
     // Ctrl+R: hide/show the debug UI so it isn't in the shot or eating the frame. Polled via
     // GetAsyncKeyState (Foundation::IsKeyDown), same focus-independent approach the free-fly
     // camera uses; edge-detected against the previous frame so a held key fires once.
-    bool captureDebugUIVisible = true;
+    bool captureDebugUIVisible = !demoMode;
     bool f9WasDown = false;
     bool ctrlRWasDown = false;
 
@@ -850,7 +881,10 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
     uint32_t whiffHandledInstance[2] = { 0, 0 };
     uint32_t sfxSeenCancelled = 0;
     uint32_t vfxSeenCancelled = 0;
+    uint32_t vfxStepTicks[2] = { 0, 0 };
     bool audioReady = false;
+    std::string currentMusic; // The track now playing ("" = none).
+    float musicFade = 1.0f;
 #ifdef OMD_DEV_TOOLS
     if (captureRun)
     {
@@ -865,8 +899,8 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
 #endif
     // Puts both fighters back to a fresh round - same recovery the debug Reset button performs
     // for the fighters, without touching camera or tooling state.
-    // Multiplier on both fighters' maximum health (AI simulation doubles it by default so a
-    // fight lasts long enough to read). Applied when a round (re)starts.
+    // Multiplier on both fighters' maximum health, applied when a round (re)starts. Adjustable in
+    // the debug window.
     float healthScale = 1.0f;
     const auto resetRound = [&]()
     {
@@ -893,6 +927,12 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
     Game::FightDirector fightDirector;
     bool aiSimulation = false;
     uint32_t aiSeed = initialAiSeed;
+    // Round announcement and the post-knockout choice (demo flow). While either is up, and from
+    // the knockout until the next round, both fighters get neutral input.
+    constexpr float kFightIntroSeconds = 1.5f;
+    float introSeconds = 0.0f;
+    bool continueActive = false;
+    Game::ContinueState continueState;
     // Multiplier on the simulation rate (animation included); AI simulation raises it a little
     // by default so the fight reads with more pace. Adjustable in the debug window.
     float gameSpeed = 1.0f;
@@ -975,14 +1015,16 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
         {
             gameSpeed = 1.25f;
         }
-        if (healthScale < 1.5f)
-        {
-            healthScale = 2.0f;
-        }
         resetRound();
         Game::ResetAiBrain(playerBrain, aiSeed);
         Game::ResetAiBrain(dummyBrain, aiSeed + 7919u);
         fightDirector.Reset(aiSeed, registry.get<Game::Health>(characterEntity).max, registry.get<Game::Health>(dummyEntity).max);
+        continueActive = false;
+        if (demoMode)
+        {
+            introSeconds = kFightIntroSeconds;
+            sfxCues.OnFight();
+        }
     };
     if (prototype.sfx || prototype.music)
     {
@@ -993,6 +1035,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
             if (prototype.music)
             {
                 Engine::Audio::PlayMusic("music_loop", prototype.musicVolume);
+                currentMusic = "music_loop";
             }
         }
     }
@@ -1005,6 +1048,61 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
 #endif
     const std::function<void()> hudUI = [&]()
     {
+        if (menuActive)
+        {
+            if (splashActive)
+            {
+                if (splashTime >= Game::Splash::kDuration)
+                {
+                    splashActive = false;
+                    Game::ResetMainMenu(menuState);
+                }
+                else
+                {
+                    splashTime = Game::DrawSplashText(splash, splashTime, GetForegroundWindow() == window);
+                    return;
+                }
+            }
+            const bool focused = GetForegroundWindow() == window;
+            switch (Game::DrawMainMenu(menuState, hudDeltaSeconds, focused))
+            {
+            case Game::MenuResult::Play:
+                menuActive = false;
+                resetRound();
+                if (demoMode)
+                {
+                    startAiSimulation();
+                }
+                rebuildDrawItems();
+                break;
+            case Game::MenuResult::Quit:
+                PostQuitMessage(0);
+                break;
+            default:
+                break;
+            }
+            return;
+        }
+        if (continueActive)
+        {
+            switch (Game::DrawContinueScreen(continueState, hudDeltaSeconds, GetForegroundWindow() == window))
+            {
+            case Game::ContinueResult::Rematch:
+                ++aiSeed; // A different fight than the last one.
+                startAiSimulation();
+                break;
+            case Game::ContinueResult::Cancel:
+                continueActive = false;
+                menuActive = true;
+                aiSimulation = false;
+                introSeconds = 0.0f;
+                Game::ResetMainMenu(menuState);
+                rebuildDrawItems();
+                break;
+            default:
+                break;
+            }
+        }
         if (!prototype.hud)
         {
             return;
@@ -1023,6 +1121,15 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
             input.bannerVisible = true;
             input.bannerAlpha = matchFlow.BannerAlpha();
             input.bannerSubtitle = matchFlow.WinnerSide() == 0 ? "PLAYER 1 WINS" : "PLAYER 2 WINS";
+        }
+        if (!input.bannerVisible && introSeconds > 0.0f)
+        {
+            // "FIGHT!": quick fade in, a short fade out at the end.
+            const float elapsed = kFightIntroSeconds - introSeconds;
+            input.bannerVisible = true;
+            input.bannerTitle = "FIGHT!";
+            input.bannerSubtitle = "";
+            input.bannerAlpha = std::clamp((std::min)(elapsed / 0.12f, introSeconds / 0.3f), 0.0f, 1.0f);
         }
         Game::DrawHud(hudState, input, hudDeltaSeconds);
     };
@@ -1097,7 +1204,12 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
         const bool allowCameraMouse = true;
         const bool allowCameraKeyboard = true;
 #endif
-        Engine::UpdateFreeFlyCamera(camera, window, deltaSeconds, allowCameraMouse, allowCameraKeyboard);
+        // Not in the menu or the demo flow: the mouse buttons and the gamepad sticks (used there
+        // for choosing) would otherwise also fly the camera.
+        if (!menuActive && !demoMode)
+        {
+            Engine::UpdateFreeFlyCamera(camera, window, deltaSeconds, allowCameraMouse, allowCameraKeyboard);
+        }
         if (enableCameraFollow)
         {
             // A simple "invisible point at the midpoint of both fighters" follow - only X eases
@@ -1139,6 +1251,19 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
             const DirectX::XMFLOAT4 tint = juice.TintFor(side, fighterBaseTint[side]);
             Renderer::Buffer::Update(fighterTintBuffer[side], &tint, sizeof(tint));
         }
+        if (splashActive)
+        {
+            splashTime += deltaSeconds;
+        }
+        if (menuActive)
+        {
+            // A fixed, slowly drifting camera close to the skull pile.
+            const DirectX::XMFLOAT3 focus = Game::BackdropMenuFocus(backdrop);
+            shakenCamera = Engine::Camera{};
+            shakenCamera.position = { focus.x + 0.3f * std::sin(menuState.time * 0.23f), focus.y + 0.08f * std::sin(menuState.time * 0.17f),
+                                      focus.z - 3.0f };
+        }
+        Game::UpdateSplash(splash, shakenCamera, aspectRatio, splashTime, menuActive && splashActive);
         const DirectX::XMFLOAT4X4 viewProjection = Engine::ComputeViewProjection(shakenCamera, aspectRatio);
 #else
         const DirectX::XMFLOAT4X4 viewProjection = Engine::ComputeViewProjection(camera, aspectRatio);
@@ -1147,12 +1272,35 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
 #if defined(OMD_PROTOTYPE)
         if (audioReady)
         {
-            Engine::Audio::SetMusicVolume(prototype.music ? prototype.musicVolume : 0.0f);
+            // Which track belongs to the screen: none over the two opening text pages of the demo
+            // launch, the slow one behind the menu, the fight track otherwise. A newly started
+            // track fades in.
+            const char* wantedMusic = (menuActive && splashActive) ? "" : (menuActive ? "music_menu" : "music_loop");
+            if (!prototype.music)
+            {
+                wantedMusic = "";
+            }
+            if (currentMusic != wantedMusic)
+            {
+                currentMusic = wantedMusic;
+                musicFade = 0.0f;
+                if (wantedMusic[0] == '\0')
+                {
+                    Engine::Audio::StopMusic();
+                }
+                else
+                {
+                    Engine::Audio::PlayMusic(wantedMusic, 0.0f);
+                }
+            }
+            musicFade = (std::min)(1.0f, musicFade + deltaSeconds / 1.5f);
+            Engine::Audio::SetMusicVolume(currentMusic.empty() ? 0.0f : prototype.musicVolume * musicFade);
         }
         sfxCues.SetScale(prototype.sfxVolume);
         sfxCues.Tick(deltaSeconds);
         float simDeltaSeconds = deltaSeconds * gameSpeed * (fastForward ? fastForwardFactor : 1.0f);
         hudDeltaSeconds = deltaSeconds;
+        introSeconds = (std::max)(0.0f, introSeconds - deltaSeconds);
         if (prototype.matchFlow)
         {
             int loserSide = -1;
@@ -1164,15 +1312,31 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
             {
                 loserSide = 1;
             }
-            if (matchFlow.Update(deltaSeconds, loserSide))
+            if (continueActive)
             {
-                resetRound();
+                // Waiting on the choice; the knocked-out fighter stays down.
+            }
+            else if (matchFlow.Update(deltaSeconds, loserSide))
+            {
+                if (demoMode && aiSimulation)
+                {
+                    continueActive = true;
+                    continueState = Game::ContinueState{};
+                }
+                else
+                {
+                    resetRound();
+                }
             }
             simDeltaSeconds *= matchFlow.TimeScale();
         }
         else
         {
             matchFlow.Reset();
+        }
+        if (menuActive)
+        {
+            simDeltaSeconds = 0.0f; // The fight waits behind the menu.
         }
         {
             // F2 toggles AI simulation, F3 restarts it with the next seed - usable with the
@@ -1226,6 +1390,43 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
                 Foundation::Log::Write(Foundation::Log::Severity::Info, "Sfx", "sparse SFX %s", sfxCues.Sparse() ? "ON" : "OFF");
             }
             sfxHotkeyF7Was = f7Down;
+        }
+        if (restartDemoRequested && !scriptedRun && backdrop.loaded)
+        {
+            // The --demo launch, without restarting the process: boot pages, menu, then Play
+            // runs the AI simulation with the debug UI hidden.
+            restartDemoRequested = false;
+            demoMode = true;
+            menuAllowed = true;
+            menuActive = true;
+            splashActive = true;
+            splashTime = 0.0f;
+            splash.skipWas = true;
+            camera = Engine::Camera{};
+            aiSimulation = false;
+            continueActive = false;
+            introSeconds = 0.0f;
+            Game::ResetMainMenu(menuState);
+#ifdef OMD_DEV_TOOLS
+            captureDebugUIVisible = false;
+#endif
+            resetRound();
+            rebuildDrawItems();
+        }
+        restartDemoRequested = false;
+        if (menuAllowed)
+        {
+            const bool escDown = GetForegroundWindow() == window && Foundation::IsKeyDown(VK_ESCAPE);
+            if (!menuActive && escDown && !menuEscWas)
+            {
+                menuActive = true;
+                aiSimulation = false;
+                continueActive = false;
+                introSeconds = 0.0f;
+                Game::ResetMainMenu(menuState);
+                rebuildDrawItems();
+            }
+            menuEscWas = escDown;
         }
         floorScrollSeconds += deltaSeconds;
         Game::UpdateStageScroll(stageDrawItems, floorScrollSeconds);
@@ -1310,6 +1511,13 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
                 Game::ApplyAiIntent(intent, simClock.tickCount, previousPlayerCommand, lastInputCommand);
             }
 #endif
+            const bool fightersHeld = introSeconds > 0.0f || continueActive || matchFlow.BannerVisible();
+            if (fightersHeld)
+            {
+                const uint32_t heldTick = lastInputCommand.tick;
+                lastInputCommand = Engine::InputCommand{};
+                lastInputCommand.tick = heldTick;
+            }
             playerInputHistory.Push(lastInputCommand);
 
             // Debug readout only for now (Phase 3) - only overwritten on an actual selection
@@ -1484,6 +1692,12 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
                 Game::ApplyAiIntent(intent, simClock.tickCount, previousDummyCommand, dummyInputCommand);
             }
 #endif
+            if (fightersHeld)
+            {
+                const uint32_t heldTick = dummyInputCommand.tick;
+                dummyInputCommand = Engine::InputCommand{};
+                dummyInputCommand.tick = heldTick;
+            }
             dummyInputHistory.Push(dummyInputCommand);
             Game::UpdateFighterState(
                 registry, dummyEntity,
@@ -1587,6 +1801,24 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
                 {
                     const Game::FighterState& state = registry.get<Game::FighterState>(vfxFighters[side]);
                     const bool airborne = state.IsAirborne();
+                    // A small splash for each foot-fall while running.
+                    if (state.currentState == "Run")
+                    {
+                        if (++vfxStepTicks[side] >= 12)
+                        {
+                            vfxStepTicks[side] = 0;
+                            Game::VfxEvent step;
+                            step.type = Game::VfxType::Step;
+                            const DirectX::XMFLOAT3 foot = registry.get<Engine::Transform>(vfxFighters[side]).position;
+                            step.position = { foot.x, Game::kFloorSurfaceY + 0.03f, foot.z };
+                            step.direction = { state.facingRight ? 1.0f : -1.0f, 0.0f, 0.0f };
+                            Game::PushVfxEvent(vfxSystem, step);
+                        }
+                    }
+                    else
+                    {
+                        vfxStepTicks[side] = 6;
+                    }
                     if (airborne == beforeFighters[side].airborne)
                     {
                         continue;
@@ -1884,9 +2116,9 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
         }
 #if defined(OMD_PROTOTYPE)
         Game::UpdateProjectileRender(registry, projectileSystem);
-        if (prototype.vfx)
+        if (prototype.vfx || menuActive)
         {
-            Game::UpdateBackdropFire(backdrop, vfxSystem, camera.position.x, deltaSeconds);
+            Game::UpdateBackdropFire(backdrop, vfxSystem, menuActive ? shakenCamera.position.x : camera.position.x, deltaSeconds);
             Game::UpdateVfx(registry, vfxSystem, shakenCamera, deltaSeconds);
             Game::UpdateVfxPools(registry, vfxSystem, deltaSeconds);
         }
@@ -1895,7 +2127,8 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
             Game::ClearVfx(vfxSystem);
         }
         Game::UpdateVfxRender(vfxSystem, shakenCamera);
-        Game::SetBackdropVisible(backdrop, prototype.backdrop);
+        Game::SetBackdropVisible(backdrop, prototype.backdrop || menuActive);
+        Game::SetBackdropMenu(backdrop, menuActive);
 #endif
 
 #ifdef OMD_DEV_TOOLS
@@ -2120,6 +2353,12 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
             ImGui::Checkbox("Dummy undying (auto-revive after KO)", &dummyUndying);
 #if defined(OMD_PROTOTYPE)
             ImGui::SeparatorText("Prototype");
+            if (ImGui::Button("Restart in demo mode"))
+            {
+                restartDemoRequested = true;
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled("(same as --demo)");
             ImGui::Checkbox("HUD (health bars / K.O. banner)", &prototype.hud);
             ImGui::Checkbox("Match flow (K.O. slow-mo + auto reset)", &prototype.matchFlow);
             ImGui::Checkbox("Juice (hit flash, camera shake)", &prototype.juice);
@@ -2655,10 +2894,10 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
         }
 
         if (Renderer::RenderTasks::DoFrame(
-                viewProjection, primaryContentUI, debugSectionUI, extraWindowsUI, captureDebugUIVisible,
+                viewProjection, primaryContentUI, debugSectionUI, extraWindowsUI, captureDebugUIVisible && !menuActive,
                 // The readout is part of the debug UI in live play (hidden with it); scripted
                 // capture runs always carry it, since their frames have the debug UI off.
-                (captureRun || captureDebugUIVisible) ? Engine::FrameCapture::AnnotationText() : nullptr, hudUI))
+                ((captureRun || captureDebugUIVisible) && !menuActive) ? Engine::FrameCapture::AnnotationText() : nullptr, hudUI))
         {
             camera = Engine::Camera{};
             enableCameraFollow = true;

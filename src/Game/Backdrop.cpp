@@ -9,6 +9,7 @@
 #include "Engine/ModelResources.h"
 #include "Foundation/Log.h"
 #include "Renderer/Buffer.h"
+#include "Renderer/Texture.h"
 
 #include <algorithm>
 #include <cmath>
@@ -23,9 +24,53 @@ namespace Game
         constexpr float kAspect = 1916.0f / 821.0f;
         constexpr int kHalfTiles = 2; // Tiles on each side of the centre one.
 
+        // The dark picture: ambient level and a warm pool of light around each torch.
+        constexpr float kMenuAmbient = 0.03f;
+        constexpr float kMenuTorchGain = 1.25f;
+        constexpr float kMenuTorchRadiusPixels = 300.0f;
+
         // The two wall torches, in picture coordinates (u across, v down) of the flame's base.
         constexpr float kTorchU[2] = { 0.404f, 0.603f };
         constexpr float kTorchV = 0.26f;
+
+        // The picture lit only by its two torches, as a texture.
+        Renderer::TextureHandle CreateDarkTexture(const std::string& imagePath, float torchU0, float torchU1, float torchV)
+        {
+            unsigned int width = 0;
+            unsigned int height = 0;
+            std::vector<unsigned char> pixels;
+            if (!Engine::LoadImageRgba(imagePath, width, height, pixels))
+            {
+                return Renderer::TextureHandle{};
+            }
+            const float torchU[2] = { torchU0, torchU1 };
+            for (unsigned int y = 0; y < height; ++y)
+            {
+                for (unsigned int x = 0; x < width; ++x)
+                {
+                    const float u = static_cast<float>(x) / static_cast<float>(width);
+                    const float v = static_cast<float>(y) / static_cast<float>(height);
+                    float light = 0.0f;
+                    for (const float tu : torchU)
+                    {
+                        const float dx = (u - tu) * static_cast<float>(width);
+                        const float dy = (v - torchV) * static_cast<float>(height);
+                        const float d2 = (dx * dx + dy * dy) / (kMenuTorchRadiusPixels * kMenuTorchRadiusPixels);
+                        light += 1.0f / std::pow(1.0f + d2, 1.5f);
+                    }
+                    light *= kMenuTorchGain;
+                    // Cool, very dim ambient plus warm torch light.
+                    const float r = kMenuAmbient * 0.8f + light * 1.00f;
+                    const float g = kMenuAmbient * 0.9f + light * 0.58f;
+                    const float b = kMenuAmbient * 1.2f + light * 0.26f;
+                    unsigned char* p = &pixels[(static_cast<size_t>(y) * width + x) * 4];
+                    p[0] = static_cast<unsigned char>(std::clamp(p[0] * r, 0.0f, 255.0f));
+                    p[1] = static_cast<unsigned char>(std::clamp(p[1] * g, 0.0f, 255.0f));
+                    p[2] = static_cast<unsigned char>(std::clamp(p[2] * b, 0.0f, 255.0f));
+                }
+            }
+            return Renderer::Texture::Create(pixels.data(), width, height);
+        }
 
         float Hash01(float x)
         {
@@ -55,6 +100,7 @@ namespace Game
         backdrop.tileWidth = kHeightUnits * kAspect;
         backdrop.baseY = kFloorSurfaceY;
         backdrop.z = kStageHalfDepth;
+        const Renderer::TextureHandle darkTexture = CreateDarkTexture(imagePath, kTorchU[0], kTorchU[1], kTorchV);
         backdrop.tileCount = kHalfTiles * 2 + 1;
         backdrop.torchAccumulator.assign(static_cast<size_t>(backdrop.tileCount) * 2, 0.0f);
 
@@ -85,9 +131,101 @@ namespace Game
             item.worldBuffer = Renderer::Buffer::Create(&world, sizeof(world));
             item.baseColorTexture = texture;
             backdrop.items.push_back(item);
+            if (darkTexture.index >= 0)
+            {
+                // Its own world buffer (collapsed to nothing until the menu is shown).
+                Renderer::StaticMeshDrawItem dark = item;
+                const DirectX::XMFLOAT4X4 hidden = [&]
+                {
+                    DirectX::XMFLOAT4X4 m;
+                    DirectX::XMStoreFloat4x4(&m, DirectX::XMMatrixTranspose(DirectX::XMMatrixScaling(0.0f, 0.0f, 0.0f)));
+                    return m;
+                }();
+                dark.worldBuffer = Renderer::Buffer::Create(&hidden, sizeof(hidden));
+                dark.baseColorTexture = darkTexture;
+                backdrop.menuItems.push_back(dark);
+            }
+        }
+        // A plain band above the picture, in the colour of its top edge, so a camera that looks
+        // a little higher (shake, a free-fly nudge) never shows the clear colour above the wall.
+        {
+            unsigned int width = 0;
+            unsigned int height = 0;
+            std::vector<unsigned char> pixels;
+            if (Engine::LoadImageRgba(imagePath, width, height, pixels) && width > 0 && height > 0)
+            {
+                const unsigned int rows = (std::min)(6u, height);
+                double sum[3] = { 0.0, 0.0, 0.0 };
+                for (unsigned int y = 0; y < rows; ++y)
+                {
+                    for (unsigned int x = 0; x < width; ++x)
+                    {
+                        const unsigned char* p = &pixels[(static_cast<size_t>(y) * width + x) * 4];
+                        sum[0] += p[0];
+                        sum[1] += p[1];
+                        sum[2] += p[2];
+                    }
+                }
+                const double count = static_cast<double>(rows) * static_cast<double>(width) * 255.0;
+                backdrop.capColor = { static_cast<float>(sum[0] / count), static_cast<float>(sum[1] / count),
+                                      static_cast<float>(sum[2] / count) };
+            }
+            const float half = (static_cast<float>(kHalfTiles) + 0.5f) * backdrop.tileWidth;
+            const float y0 = backdrop.baseY + backdrop.tileHeight - 0.02f;
+            const float y1 = y0 + 8.0f;
+            const Asset::Vertex vertices[4] = {
+                Asset::Vertex{ { -half, y1, backdrop.z }, { 0.0f, 1.0f, 0.0f }, { 0.5f, 0.5f } },
+                Asset::Vertex{ { half, y1, backdrop.z }, { 0.0f, 1.0f, 0.0f }, { 0.5f, 0.5f } },
+                Asset::Vertex{ { half, y0, backdrop.z }, { 0.0f, 1.0f, 0.0f }, { 0.5f, 0.5f } },
+                Asset::Vertex{ { -half, y0, backdrop.z }, { 0.0f, 1.0f, 0.0f }, { 0.5f, 0.5f } },
+            };
+            const uint32_t indices[6] = { 0, 1, 2, 0, 2, 3 };
+            const unsigned char white[4] = { 255, 255, 255, 255 };
+            Renderer::StaticMeshDrawItem cap;
+            cap.vertexBuffer = Renderer::Buffer::Create(vertices, sizeof(vertices));
+            cap.vertexStride = sizeof(Asset::Vertex);
+            cap.indexBuffer = Renderer::Buffer::Create(indices, sizeof(indices));
+            cap.indexCount = 6;
+            DirectX::XMFLOAT4X4 world;
+            DirectX::XMStoreFloat4x4(&world, DirectX::XMMatrixTranspose(DirectX::XMMatrixIdentity()));
+            cap.worldBuffer = Renderer::Buffer::Create(&world, sizeof(world));
+            cap.baseColorTexture = Renderer::Texture::Create(white, 1, 1);
+            const DirectX::XMFLOAT4 tint = { backdrop.capColor.x, backdrop.capColor.y, backdrop.capColor.z, 1.0f };
+            cap.tintBuffer = Renderer::Buffer::Create(&tint, sizeof(tint));
+            backdrop.capItems.push_back(cap);
         }
         backdrop.loaded = true;
         return backdrop;
+    }
+
+    namespace
+    {
+        void SetItemsShown(const std::vector<Renderer::StaticMeshDrawItem>& items, bool shown)
+        {
+            DirectX::XMFLOAT4X4 world;
+            const DirectX::XMMATRIX matrix = shown ? DirectX::XMMatrixIdentity() : DirectX::XMMatrixScaling(0.0f, 0.0f, 0.0f);
+            DirectX::XMStoreFloat4x4(&world, DirectX::XMMatrixTranspose(matrix));
+            for (const Renderer::StaticMeshDrawItem& item : items)
+            {
+                Renderer::Buffer::Update(item.worldBuffer, &world, sizeof(world));
+            }
+        }
+
+        // Whichever of the two tile sets should be on screen given the two switches.
+        void ApplyBackdropState(Backdrop& backdrop)
+        {
+            const bool useMenu = backdrop.menuShown && !backdrop.menuItems.empty();
+            SetItemsShown(backdrop.items, backdrop.visible && !useMenu);
+            SetItemsShown(backdrop.menuItems, backdrop.visible && useMenu);
+            SetItemsShown(backdrop.capItems, backdrop.visible);
+            // The band follows the picture's look: nearly black behind the menu.
+            const float k = useMenu ? 0.05f : 1.0f;
+            const DirectX::XMFLOAT4 tint = { backdrop.capColor.x * k, backdrop.capColor.y * k, backdrop.capColor.z * k, 1.0f };
+            for (const Renderer::StaticMeshDrawItem& item : backdrop.capItems)
+            {
+                Renderer::Buffer::Update(item.tintBuffer, &tint, sizeof(tint));
+            }
+        }
     }
 
     void SetBackdropVisible(Backdrop& backdrop, bool visible)
@@ -97,13 +235,23 @@ namespace Game
             return;
         }
         backdrop.visible = visible;
-        DirectX::XMFLOAT4X4 world;
-        const DirectX::XMMATRIX matrix = visible ? DirectX::XMMatrixIdentity() : DirectX::XMMatrixScaling(0.0f, 0.0f, 0.0f);
-        DirectX::XMStoreFloat4x4(&world, DirectX::XMMatrixTranspose(matrix));
-        for (const Renderer::StaticMeshDrawItem& item : backdrop.items)
+        ApplyBackdropState(backdrop);
+    }
+
+    void SetBackdropMenu(Backdrop& backdrop, bool menu)
+    {
+        if (!backdrop.loaded || backdrop.menuShown == menu)
         {
-            Renderer::Buffer::Update(item.worldBuffer, &world, sizeof(world));
+            return;
         }
+        backdrop.menuShown = menu;
+        ApplyBackdropState(backdrop);
+    }
+
+    DirectX::XMFLOAT3 BackdropMenuFocus(const Backdrop& backdrop)
+    {
+        // The skull pile sits in the left part of the picture, around u = 0.2, half way up.
+        return { (0.2f - 0.5f) * backdrop.tileWidth, backdrop.baseY + 0.5f * backdrop.tileHeight + 0.15f, backdrop.z };
     }
 
     void UpdateBackdropFire(Backdrop& backdrop, VfxSystem& vfx, float cameraX, float deltaSeconds)

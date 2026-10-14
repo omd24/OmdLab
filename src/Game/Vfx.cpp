@@ -209,6 +209,46 @@ namespace Game
             return Renderer::Texture::Create(pixels.data(), kSize, kSize);
         }
 
+        // Droplets of the green water the fighters stand in: thrown up and out, falling back.
+        Engine::ParticleBurst Droplets(int count, XMFLOAT3 direction, float spread, float speedMin, float speedMax, float sizeScale)
+        {
+            Engine::ParticleBurst burst;
+            burst.count = count;
+            burst.direction = direction;
+            burst.spread = spread;
+            burst.speedMin = speedMin;
+            burst.speedMax = speedMax;
+            burst.lifetimeMin = 0.28f;
+            burst.lifetimeMax = 0.55f;
+            burst.size0 = 0.12f * sizeScale;
+            burst.size1 = 0.05f * sizeScale;
+            burst.stretch = 1.9f;
+            burst.gravity = 9.0f;
+            burst.drag = 0.4f;
+            burst.color0 = { 1.1f, 1.9f, 1.0f, 1.0f };
+            burst.color1 = { 0.55f, 1.3f, 0.45f, 0.0f };
+            return burst;
+        }
+
+        // A short-lived green mist where the splash lands.
+        Engine::ParticleBurst GreenMist(int count, float sizeEnd)
+        {
+            Engine::ParticleBurst burst;
+            burst.count = count;
+            burst.direction = { 0.0f, 1.0f, 0.0f };
+            burst.spread = 0.7f;
+            burst.speedMin = 0.2f;
+            burst.speedMax = 0.7f;
+            burst.lifetimeMin = 0.25f;
+            burst.lifetimeMax = 0.45f;
+            burst.size0 = sizeEnd * 0.4f;
+            burst.size1 = sizeEnd;
+            burst.drag = 3.0f;
+            burst.color0 = { 0.8f, 1.5f, 0.75f, 0.55f };
+            burst.color1 = { 0.6f, 1.2f, 0.55f, 0.0f };
+            return burst;
+        }
+
         void Spawn(Engine::ParticleSystem& particles, const VfxEvent& event, const XMFLOAT3& towardCamera)
         {
             const XMFLOAT3 p = { event.position.x + towardCamera.x * kTowardCameraOffset,
@@ -257,11 +297,18 @@ namespace Game
             case VfxType::Landing:
                 for (const float side : { -1.0f, 1.0f })
                 {
-                    particles.Burst(Puff(3, { side, 0.15f, 0.0f }, 0.25f, 0.26f, { 0.8f, 0.75f, 0.68f, 0.45f }), p);
+                    particles.Burst(Droplets(6, { side * 0.8f, 0.7f, 0.0f }, 0.3f, 1.6f, 3.4f, 1.0f), p);
                 }
+                particles.Burst(Droplets(5, { 0.0f, 1.0f, 0.0f }, 0.35f, 1.8f, 3.4f, 1.0f), p);
+                particles.Burst(GreenMist(3, 0.34f), p);
                 break;
             case VfxType::JumpOff:
-                particles.Burst(Puff(3, { 0.0f, 0.2f, 0.0f }, 0.7f, 0.20f, { 0.8f, 0.75f, 0.68f, 0.35f }), p);
+                particles.Burst(Droplets(6, { 0.0f, 1.0f, 0.0f }, 0.6f, 1.4f, 3.0f, 0.9f), p);
+                particles.Burst(GreenMist(2, 0.26f), p);
+                break;
+            case VfxType::Step:
+                particles.Burst(Droplets(3, { -event.direction.x * 0.5f, 1.0f, 0.0f }, 0.5f, 0.9f, 2.0f, 0.7f), p);
+                particles.Burst(GreenMist(1, 0.18f), p);
                 break;
             case VfxType::FireballImpact:
             {
