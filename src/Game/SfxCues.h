@@ -58,7 +58,9 @@ namespace Game
             bool voice = true;           // The attacker's voice on attacks.
             float ownHitVolume = 0.9f;
             float ownWhiffVolume = 0.65f;
-            float ownVoiceVolume = 0.8f;
+            float ownVoiceVolume = 0.5f;     // Attack voice: kept under the hits and whiffs.
+            float voiceChance = 0.4f;        // Chance a light/medium attack (opener) has a voice at all...
+            float heavyVoiceChance = 0.75f;  // ...and a heavy one (a string's ender).
             float ownKoVolume = 0.85f;
             // The older recordings stay as a quiet extra layer now and then (0 chance = off).
             float legacyChance = 0.35f;
@@ -253,7 +255,7 @@ namespace Game
         {
             if (categories.own && m_fightOwn != Engine::Audio::kInvalidSound)
             {
-                Out(m_fightOwn, categories.ownVoiceVolume * 1.1f, 1.0f, kGroupVoice, false);
+                Out(m_fightOwn, 0.9f, 1.0f, kGroupVoice, false);
             }
         }
 
@@ -461,8 +463,10 @@ namespace Game
         }
 
         // The attacker's voice: a medium or heavy recording by the move (the higher-pitched light
-        // one, voice_light_1, is not used), the fireball throw by itself. Middle links of a string stay quiet and voices keep a little
-        // distance from each other so a flurry does not become a wall of shouting.
+        // one, voice_light_1, is not used), the fireball throw by itself. The most repeated
+        // attacks (light and medium openers, which are also the ones that miss most) only have a
+        // voice now and then and never two in a row; middle links of a string stay silent and
+        // voices keep some distance from each other, so a flurry is not a wall of shouting.
         void PlayAttackVoice(const std::string& moveId, bool heavy, bool fireball, bool continuation)
         {
             if (!categories.own || !categories.voice)
@@ -473,13 +477,29 @@ namespace Game
             {
                 if (categories.fireball && m_voiceFireball != Engine::Audio::kInvalidSound)
                 {
-                    Out(m_voiceFireball, categories.ownVoiceVolume, 1.0f, kGroupVoice, false);
+                    Out(m_voiceFireball, categories.ownVoiceVolume * 1.4f, 1.0f, kGroupVoice, false);
                 }
                 return;
             }
             if ((continuation && !heavy) || m_time - m_lastVoice < 0.4f)
             {
                 return;
+            }
+            if (heavy)
+            {
+                if (Next() >= categories.heavyVoiceChance)
+                {
+                    return;
+                }
+            }
+            else
+            {
+                const bool voiced = !m_lastOpenerVoiced && Next() < categories.voiceChance;
+                m_lastOpenerVoiced = voiced;
+                if (!voiced)
+                {
+                    return;
+                }
             }
             m_lastVoice = m_time;
             PlayRandom(heavy ? m_voiceHeavy : m_voiceMedium, categories.ownVoiceVolume * (heavy ? 1.1f : 1.0f), 1.0f, kGroupVoice,
@@ -489,6 +509,7 @@ namespace Game
         Set m_gruntLight, m_gruntHeavy, m_swish, m_whooshHeavy, m_hitLight, m_hitHeavy, m_block, m_crushLight, m_crushHeavy, m_roar, m_whiff;
         Set m_hitOwn, m_whiffOwn, m_voiceMedium, m_voiceHeavy;
         float m_lastVoice = -10.0f;
+        bool m_lastOpenerVoiced = false;
         Engine::Audio::SoundId m_voiceFireball = Engine::Audio::kInvalidSound;
         Engine::Audio::SoundId m_koOwn = Engine::Audio::kInvalidSound;
         Engine::Audio::SoundId m_fightOwn = Engine::Audio::kInvalidSound;

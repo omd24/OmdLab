@@ -2398,6 +2398,8 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
                 ImGui::SliderFloat("Recorded hit level", &sfxCues.categories.ownHitVolume, 0.0f, 3.0f);
                 ImGui::SliderFloat("Recorded whiff level", &sfxCues.categories.ownWhiffVolume, 0.0f, 3.0f);
                 ImGui::SliderFloat("Recorded voice level", &sfxCues.categories.ownVoiceVolume, 0.0f, 3.0f);
+                ImGui::SliderFloat("Voice chance (light/medium)", &sfxCues.categories.voiceChance, 0.0f, 1.0f);
+                ImGui::SliderFloat("Voice chance (heavy)", &sfxCues.categories.heavyVoiceChance, 0.0f, 1.0f);
                 ImGui::SliderFloat("Recorded K.O. level", &sfxCues.categories.ownKoVolume, 0.0f, 3.0f);
                 ImGui::SliderFloat("Run roar level", &sfxCues.categories.runRoarVolume, 0.0f, 3.0f);
                 ImGui::SliderFloat("Run loop level", &sfxCues.categories.runLoopVolume, 0.0f, 1.0f);
