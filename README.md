@@ -2,7 +2,7 @@
 
 A hobby game engine built on DirectX 12 (AI-assisted programming), driving a 2D-camera fighting game with minimalistic 3D characters.
 
-[![Prototype video](https://img.youtube.com/vi/jhIUb1tT0B0/maxresdefault.jpg)](https://youtu.be/jhIUb1tT0B0)
+[![Prototype video](https://img.youtube.com/vi/jhIUb1tT0B0/sddefault.jpg)](https://youtu.be/jhIUb1tT0B0)
 
 *Prototype showcase video (click to watch on YouTube).*
 
