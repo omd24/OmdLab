@@ -1770,7 +1770,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
                     // give ground, so whatever it could not absorb is handed to the other one,
                     // rather than leaving a residual overlap that would take several more ticks
                     // to work out (and keep the pair nearly level in the meantime).
-                    constexpr float kWall = Game::kStageMovementHalfWidth;
+                    constexpr float kWall = Game::kStageFighterLimit;
                     leftTransform.position.x -= overlap * 0.5f;
                     rightTransform.position.x += overlap * 0.5f;
                     if (leftTransform.position.x < -kWall)

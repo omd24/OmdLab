@@ -414,7 +414,7 @@ namespace Game
         // the wall side. Mostly escape by jumping over the opponent.
         constexpr float kCornerZone = 0.9f;
         const float wallSide = self.x >= 0.0f ? 1.0f : -1.0f;
-        if (std::fabs(self.x) > kStageMovementHalfWidth - kCornerZone && toward * wallSide < 0.0f && distance < 2.4f &&
+        if (std::fabs(self.x) > kStageFighterLimit - kCornerZone && toward * wallSide < 0.0f && distance < 2.4f &&
             AiRand01(brain.rng) < 0.6f)
         {
             Foundation::Log::Write(Foundation::Log::Severity::Info, "AI", "corner escape at x=%.2f", self.x);

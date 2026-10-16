@@ -1,5 +1,6 @@
 #include "CaptureRun.h"
 
+#include "GameConstants.h"
 #include "InputBindings.h"
 #include "Engine/FrameCapture.h"
 #include "Foundation/Log.h"
@@ -353,20 +354,20 @@ namespace
         {
             return -2.0f;
         }
-        // Wall scripts: the dummy stands in the corner (the stage's movement limit is 5.5), or
+        // Wall scripts: the dummy stands in the corner (at the fighters' limit, kStageFighterLimit), or
         // half a unit short of it for the jump that is meant to clear the dummy and land on the
         // wall side.
         if (name == "corner_left_level")
         {
-            return -5.5f;
+            return -Game::kStageFighterLimit;
         }
         if (name == "corner_left_pass")
         {
-            return -5.0f;
+            return -(Game::kStageFighterLimit - 0.5f);
         }
         if (name == "corner_right_level")
         {
-            return 5.5f;
+            return Game::kStageFighterLimit;
         }
         // Aerial attacks: the dummy stands where the jump's own travel puts a strike within
         // reach - close for a neutral jump (about as close as body separation allows, since an

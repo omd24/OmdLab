@@ -32,6 +32,7 @@ namespace
     // feel" precedent as kGravity above.
     constexpr float kHitPushbackDistance = 0.35f;     // Defender, on a real (unblocked) hit.
     constexpr float kBlockPushbackDistance = 0.45f;   // Defender, on block - a bit more than a hit, standard "pushblock" spacing incentive.
+    constexpr float kBlockChipFraction = 0.25f;       // Share of a blocked hit's damage the defender still takes.
     constexpr float kAttackerRecoilDistance = 0.1f;   // Attacker, same distance regardless of hit/block.
     // Fraction of pushbackRemaining applied each tick - an ease-out (biggest step first,
     // tapering toward zero), not a fixed-duration slide. At 60Hz this covers ~90% of the total
@@ -663,11 +664,11 @@ namespace
         }
         // Stage bounds - applied once here regardless of which state above actually moved the
         // character (Walk/Run/Jump all funnel through moveUnitsPerSecond), same "one clamp,
-        // not one per state" reasoning as Jump's own Y-ground clamp. kStageMovementHalfWidth is
-        // derived from the ground plane's own kStageHalfWidth (GroundPlane.cpp) minus a wall
-        // margin, so the visible floor and this clamp stay tied to one stage-size constant while
-        // still keeping the whole fighter body on the floor - see GameConstants.h.
-        transform.position.x = std::clamp(transform.position.x, -Game::kStageMovementHalfWidth, Game::kStageMovementHalfWidth);
+        // not one per state" reasoning as Jump's own Y-ground clamp. kStageFighterLimit is
+        // the wall's position (derived from the ground plane's own kStageHalfWidth) minus a
+        // body width, so a fighter at the limit stands against the wall, not in it - see
+        // GameConstants.h.
+        transform.position.x = std::clamp(transform.position.x, -Game::kStageFighterLimit, Game::kStageFighterLimit);
         if (!std::isfinite(transform.position.x))
         {
             Foundation::Log::Write(
@@ -1185,7 +1186,15 @@ namespace Game
                         {
                             state.stateDurationFrames = attackingMove->onBlockStunFrames;
                             state.hitReactionClip = "block_hit";
-                            // No chip damage on block yet - not modeled.
+                            // Chip damage: a blocked hit still costs a little health (a fraction
+                            // of its damage, at least 1), so holding block forever is not a way
+                            // to never lose. It can finish a fighter.
+                            if (attackingMove->damage > 0)
+                            {
+                                Health& blockedHealth = registry.get<Health>(entity);
+                                const int chip = std::max(1, static_cast<int>(std::lround(static_cast<float>(attackingMove->damage) * kBlockChipFraction)));
+                                blockedHealth.current = std::max(0, blockedHealth.current - chip);
+                            }
                         }
                         else
                         {

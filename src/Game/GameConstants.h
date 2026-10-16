@@ -51,6 +51,11 @@ namespace Game
     // (0.35) as a starting point, not because the two are required to agree.
     constexpr float kFighterBodyHalfWidth = 0.35f;
 
+    // How far a fighter's root can go. The wall marker stands at kStageMovementHalfWidth; the
+    // limit sits one body width short of it (plus a little for the limbs), so a fighter at the
+    // limit stands tangent to the wall instead of half inside it.
+    constexpr float kStageFighterLimit = kStageMovementHalfWidth - (kFighterBodyHalfWidth + 0.15f);
+
     // Starting (and post-Reset) world-X gap between the player and the dummy. No move's own
     // reach + lunge closes the old default of 2.0 at all - confirmed by capturing every move
     // against a stationary dummy at that spacing and finding zero hits ever land, meaning a
